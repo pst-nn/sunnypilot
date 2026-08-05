@@ -1,6 +1,7 @@
 import pyray as rl
 import cereal.messaging as messaging
 from openpilot.selfdrive.ui.mici.layouts.home import MiciHomeLayout
+from openpilot.selfdrive.ui.mici.layouts.driving_profiles import DrivingProfilesLayout
 from openpilot.selfdrive.ui.mici.layouts.settings.settings import SettingsLayout
 from openpilot.selfdrive.ui.mici.layouts.offroad_alerts import MiciOffroadAlerts
 from openpilot.selfdrive.ui.mici.onroad.augmented_road_view import AugmentedRoadView
@@ -30,13 +31,14 @@ class MiciMainLayout(Scroller):
 
     # Initialize widgets
     self._home_layout = MiciHomeLayout()
+    self._profiles_layout = DrivingProfilesLayout()
     self._alerts_layout = MiciOffroadAlerts()
     self._settings_layout = SettingsLayout()
     self._car_onroad_layout = AugmentedRoadView(bookmark_callback=self._on_bookmark_clicked)
     self._body_onroad_layout = BodyLayout()
 
     # Initialize widget rects
-    for widget in (self._home_layout, self._alerts_layout, self._settings_layout,
+    for widget in (self._home_layout, self._profiles_layout, self._alerts_layout, self._settings_layout,
                    self._car_onroad_layout, self._body_onroad_layout):
       # TODO: set parent rect and use it if never passed rect from render (like in Scroller)
       widget.set_rect(rl.Rectangle(0, 0, gui_app.width, gui_app.height))
@@ -71,6 +73,7 @@ class MiciMainLayout(Scroller):
   def _setup_callbacks(self):
     self._home_layout.set_callbacks(
       on_settings=lambda: gui_app.push_widget(self._settings_layout),
+      on_profiles=lambda: gui_app.push_widget(self._profiles_layout),
       on_alerts=lambda: self._scroll_to(self._alerts_layout),
       alert_count_callback=self._alerts_layout.active_alerts,
       max_severity_callback=self._alerts_layout.max_severity,

@@ -1,9 +1,10 @@
 import datetime
-import time
 
 from cereal import log
 import pyray as rl
 from collections.abc import Callable
+from openpilot.selfdrive.ui.mici.driving_profiles import driving_profiles_available
+from openpilot.selfdrive.ui.mici.layouts.driving_profiles import DrivingProfileHomeButton
 from openpilot.system.ui.widgets import Widget
 from openpilot.system.ui.widgets.layouts import HBoxLayout
 from openpilot.system.ui.widgets.icon_widget import IconWidget
@@ -15,6 +16,7 @@ from openpilot.system.version import RELEASE_BRANCHES
 HEAD_BUTTON_FONT_SIZE = 40
 HOME_PADDING = 8
 ALERTS_ZONE_WIDTH = 180
+SETTINGS_TOUCH_PADDING = 18
 
 NetworkType = log.DeviceState.NetworkType
 
@@ -129,12 +131,9 @@ class MiciHomeLayout(Widget):
   def __init__(self):
     super().__init__()
     self._on_settings_click: Callable | None = None
+    self._on_profiles_click: Callable | None = None
     self._on_alerts_click: Callable | None = None
     self._alert_count_callback: Callable[[], int] | None = None
-
-    self._mouse_down_t: None | float = None
-    self._did_long_press = False
-    self._is_pressed_prev = False
 
     self._version_text = self._get_version_text()
 
@@ -145,9 +144,13 @@ class MiciHomeLayout(Widget):
     self._body_icon = IconWidget("icons_mici/body.png", (54, 37))
 
     self._alerts_pill = AlertsPill()
+    self._profile_button = self._child(DrivingProfileHomeButton())
+    self._profile_button.set_visible(lambda: driving_profiles_available(ui_state.CP))
+
+    self._settings_icon = IconWidget("icons_mici/settings.png", (48, 48), opacity=0.9)
 
     self._status_bar_layout = HBoxLayout([
-      IconWidget("icons_mici/settings.png", (48, 48), opacity=0.9),
+      self._settings_icon,
       NetworkIcon(),
       self._experimental_icon,
       self._egpu_icon,
@@ -163,41 +166,36 @@ class MiciHomeLayout(Widget):
     self._branch_label = UnifiedLabel("", font_size=36, text_color=rl.GRAY, font_weight=FontWeight.ROMAN, scroll=True)
     self._version_commit_label = UnifiedLabel("", font_size=36, text_color=rl.GRAY, font_weight=FontWeight.ROMAN, max_width=480, wrap_text=False)
 
-  def _update_state(self):
-    if self.is_pressed and not self._is_pressed_prev:
-      self._mouse_down_t = time.monotonic()
-    elif not self.is_pressed and self._is_pressed_prev:
-      self._mouse_down_t = None
-      self._did_long_press = False
-    self._is_pressed_prev = self.is_pressed
-
-    if self._mouse_down_t is not None:
-      if time.monotonic() - self._mouse_down_t > 0.5:
-        # long gating for experimental mode - only allow toggle if longitudinal control is available
-        if ui_state.has_longitudinal_control:
-          ui_state.experimental_mode = not ui_state.experimental_mode
-          ui_state.params.put("ExperimentalMode", ui_state.experimental_mode, block=True)
-        self._mouse_down_t = None
-        self._did_long_press = True
-
-  def set_callbacks(self, on_settings: Callable | None = None, on_alerts: Callable | None = None,
-                    alert_count_callback: Callable[[], int] | None = None,
+  def set_callbacks(self, on_settings: Callable | None = None, on_profiles: Callable | None = None,
+                    on_alerts: Callable | None = None, alert_count_callback: Callable[[], int] | None = None,
                     max_severity_callback: Callable[[], int | None] | None = None):
     self._on_settings_click = on_settings
+    self._on_profiles_click = on_profiles
     self._on_alerts_click = on_alerts
     self._alert_count_callback = alert_count_callback
     self._alerts_pill.set_alert_count_callback(alert_count_callback, max_severity_callback)
 
   def _handle_mouse_release(self, mouse_pos: MousePos):
-    if not self._did_long_press:
-      relative_x = mouse_pos.x - self.rect.x
-      has_alerts = self._alert_count_callback and self._alert_count_callback() > 0
-      if has_alerts and relative_x > self.rect.width - ALERTS_ZONE_WIDTH:
-        if self._on_alerts_click:
-          self._on_alerts_click()
-      elif self._on_settings_click:
+    relative_x = mouse_pos.x - self.rect.x
+    has_alerts = self._alert_count_callback and self._alert_count_callback() > 0
+    if has_alerts and relative_x > self.rect.width - ALERTS_ZONE_WIDTH:
+      if self._on_alerts_click:
+        self._on_alerts_click()
+      return
+
+    settings_touch_rect = rl.Rectangle(
+      self._settings_icon.rect.x - SETTINGS_TOUCH_PADDING,
+      self._settings_icon.rect.y - SETTINGS_TOUCH_PADDING,
+      self._settings_icon.rect.width + SETTINGS_TOUCH_PADDING * 2,
+      self._settings_icon.rect.height + SETTINGS_TOUCH_PADDING * 2,
+    )
+    if rl.check_collision_point_rec(mouse_pos, settings_touch_rect):
+      if self._on_settings_click:
         self._on_settings_click()
-    self._did_long_press = False
+    elif driving_profiles_available(ui_state.CP) and self._on_profiles_click:
+      self._on_profiles_click()
+    elif self._on_settings_click:
+      self._on_settings_click()
 
   def _get_version_text(self) -> tuple[str, str, str, str] | None:
     version = ui_state.params.get("Version")
@@ -218,6 +216,8 @@ class MiciHomeLayout(Widget):
     return version, branch, commit[:7], date_str
 
   def _render(self, _):
+    profiles_available = driving_profiles_available(ui_state.CP)
+
     # TODO: why is there extra space here to get it to be flush?
     text_pos = rl.Vector2(self.rect.x - 2 + HOME_PADDING, self.rect.y - 16)
     self._openpilot_label.set_position(text_pos.x, text_pos.y)
@@ -240,11 +240,18 @@ class MiciHomeLayout(Widget):
       self._branch_label.set_position(version_pos.x + self._version_label.text_width + self._date_label.text_width + 20, version_pos.y)
       self._branch_label.render()
 
-      if not release_branch:
+      if not release_branch and not profiles_available:
         # 2nd line
         self._version_commit_label.set_text(self._version_text[2])
         self._version_commit_label.set_position(version_pos.x, version_pos.y + self._date_label.font_size + 7)
         self._version_commit_label.render()
+
+    if profiles_available:
+      self._profile_button.set_position(
+        self.rect.x + (self.rect.width - self._profile_button.rect.width) / 2,
+        self.rect.y + 132,
+      )
+      self._profile_button.render()
 
     # ***** Center-aligned bottom section icons *****
     self._experimental_icon.set_visible(ui_state.experimental_mode)

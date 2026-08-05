@@ -5,6 +5,7 @@ from openpilot.selfdrive.ui.mici.widgets.button import BigButton, BigToggle, Big
 from openpilot.selfdrive.ui.mici.widgets.dialog import BigDialog, BigInputDialog, BigConfirmationCircleButton
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.selfdrive.ui.layouts.settings.common import restart_needed_callback
+from openpilot.selfdrive.ui.mici.driving_profiles import driving_profiles_available
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.selfdrive.ui.widgets.ssh_key import SshKeyFetcher
 
@@ -147,6 +148,10 @@ class DeveloperLayoutMici(NavScroller):
       if not alpha_avail or ui_state.is_release:
         self._alpha_long_toggle.set_visible(False)
         ui_state.params.remove("AlphaLongitudinalEnabled")
+      elif driving_profiles_available(ui_state.CP):
+        # Managed together with Experimental/OpenpilotEnabledToggle by the
+        # home-screen profile picker.
+        self._alpha_long_toggle.set_visible(False)
       else:
         self._alpha_long_toggle.set_visible(True)
 

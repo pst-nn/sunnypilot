@@ -4,6 +4,7 @@ from openpilot.system.ui.widgets.scroller import NavScroller
 from openpilot.selfdrive.ui.mici.widgets.button import BigParamControl, BigMultiParamToggle
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.selfdrive.ui.layouts.settings.common import restart_needed_callback
+from openpilot.selfdrive.ui.mici.driving_profiles import driving_profiles_available
 from openpilot.selfdrive.ui.ui_state import ui_state
 
 PERSONALITY_TO_INT = log.LongitudinalPersonality.schema.enumerants
@@ -20,7 +21,7 @@ class TogglesLayoutMici(NavScroller):
     always_on_dm_toggle = BigParamControl("always-on driver monitor", "AlwaysOnDM")
     record_front = BigParamControl("record & upload driver camera", "RecordFront", toggle_callback=restart_needed_callback)
     record_mic = BigParamControl("record & upload mic audio", "RecordAudio", toggle_callback=restart_needed_callback)
-    enable_openpilot = BigParamControl("enable sunnypilot", "OpenpilotEnabledToggle", toggle_callback=restart_needed_callback)
+    self._enable_openpilot = BigParamControl("enable sunnypilot", "OpenpilotEnabledToggle", toggle_callback=restart_needed_callback)
 
     self._scroller.add_widgets([
       self._personality_toggle,
@@ -30,7 +31,7 @@ class TogglesLayoutMici(NavScroller):
       always_on_dm_toggle,
       record_front,
       record_mic,
-      enable_openpilot,
+      self._enable_openpilot,
     ])
 
     # Toggle lists
@@ -41,10 +42,10 @@ class TogglesLayoutMici(NavScroller):
       ("AlwaysOnDM", always_on_dm_toggle),
       ("RecordFront", record_front),
       ("RecordAudio", record_mic),
-      ("OpenpilotEnabledToggle", enable_openpilot),
+      ("OpenpilotEnabledToggle", self._enable_openpilot),
     )
 
-    enable_openpilot.set_enabled(lambda: not ui_state.engaged)
+    self._enable_openpilot.set_enabled(lambda: not ui_state.engaged)
     record_front.set_enabled(False if ui_state.params.get_bool("RecordFrontLock") else (lambda: not ui_state.engaged))
     record_mic.set_enabled(lambda: not ui_state.engaged)
 
@@ -72,15 +73,22 @@ class TogglesLayoutMici(NavScroller):
 
     # CP gating for experimental mode
     if ui_state.CP is not None:
-      if ui_state.has_longitudinal_control:
-        self._experimental_btn.set_visible(True)
+      has_longitudinal_control = ui_state.has_longitudinal_control
+      if has_longitudinal_control:
         self._personality_toggle.set_visible(True)
       else:
         # no long for now
-        self._experimental_btn.set_visible(False)
         self._experimental_btn.set_checked(False)
         self._personality_toggle.set_visible(False)
         ui_state.params.remove("ExperimentalMode")
+
+      # Tesla Alpha Longitudinal is managed as an atomic profile on mici. Hide
+      # independent controls that could create contradictory combinations.
+      profile_managed = driving_profiles_available(ui_state.CP)
+      self._experimental_btn.set_visible(has_longitudinal_control and not profile_managed)
+      self._enable_openpilot.set_visible(not profile_managed)
+    else:
+      self._enable_openpilot.set_visible(True)
 
     # Refresh toggles from params to mirror external changes
     for key, item in self._refresh_toggles:
