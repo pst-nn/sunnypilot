@@ -4,6 +4,8 @@ import pytest
 
 from openpilot.selfdrive.ui.mici.driving_profiles import (
   DrivingProfile,
+  PROFILE_DETAILS,
+  PROFILE_LABELS,
   apply_driving_profile,
   driving_profiles_available,
   get_driving_profile,
@@ -108,6 +110,11 @@ def test_current_profile_is_centered_with_both_alternatives_one_swipe_away(curre
 
 def test_custom_state_defaults_carousel_to_tacc_in_center():
   assert get_profile_carousel_order(None)[1] == DrivingProfile.SUNNY_TACC
+
+
+def test_profile_copy_fits_native_card_without_ellipsis():
+  assert all(len(label) <= 18 for label in PROFILE_LABELS.values())
+  assert all(len(detail) <= 18 for detail in PROFILE_DETAILS.values())
 
 
 @pytest.mark.parametrize(

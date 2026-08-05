@@ -71,6 +71,7 @@ class MiciMainLayout(Scroller):
     return self._body_onroad_layout if ui_state.is_body else self._car_onroad_layout
 
   def _setup_callbacks(self):
+    self._profiles_layout.set_profile_applied_callback(self._home_layout.show_profile_applied_feedback)
     self._home_layout.set_callbacks(
       on_settings=lambda: gui_app.push_widget(self._settings_layout),
       on_profiles=lambda: gui_app.push_widget(self._profiles_layout),
