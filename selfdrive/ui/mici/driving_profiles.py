@@ -30,9 +30,15 @@ PROFILE_CONFIGS = {
 }
 
 PROFILE_LABELS = {
-  DrivingProfile.STOCK_DASHCAM: "tesla stock / dashcam",
-  DrivingProfile.SUNNY_TACC: "sunny + tesla tacc",
-  DrivingProfile.SUNNY_LONG_EXPERIMENTAL: "sunny long + experimental",
+  DrivingProfile.STOCK_DASHCAM: "Tesla / Dashcam",
+  DrivingProfile.SUNNY_TACC: "sunny + TACC",
+  DrivingProfile.SUNNY_LONG_EXPERIMENTAL: "sunny Long + Exp",
+}
+
+PROFILE_DETAILS = {
+  DrivingProfile.STOCK_DASHCAM: "Tesla control",
+  DrivingProfile.SUNNY_TACC: "Tesla TACC",
+  DrivingProfile.SUNNY_LONG_EXPERIMENTAL: "AEB OFF",
 }
 
 
