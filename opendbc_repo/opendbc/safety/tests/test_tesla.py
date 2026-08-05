@@ -30,6 +30,7 @@ def round_angle(apply_angle, can_offset=0):
 
 class TestTeslaSafetyBase(common.CarSafetyTest, common.AngleSteeringSafetyTest, common.LongitudinalAccelSafetyTest):
   SAFETY_PARAM = 0
+  FSD14 = False
 
   RELAY_MALFUNCTION_ADDRS = {0: (MSG_DAS_steeringControl, MSG_APS_eacMonitor)}
   FWD_BLACKLISTED_ADDRS = {2: [MSG_DAS_steeringControl, MSG_APS_eacMonitor]}
@@ -58,6 +59,7 @@ class TestTeslaSafetyBase(common.CarSafetyTest, common.AngleSteeringSafetyTest, 
 
   cnt_epas = 0
   cnt_angle_cmd = 0
+  cnt_autopark_ready = 0
 
   packer: CANPackerSafety
 
@@ -125,6 +127,16 @@ class TestTeslaSafetyBase(common.CarSafetyTest, common.AngleSteeringSafetyTest, 
       "DI_autoparkState": autopark_state,
     }
     return self.packer.make_can_msg_safety("DI_state", 0, values)
+
+  def _autopark_status_msg(self, ready, active=False, bus=2):
+    values = {
+      "DAS_autoparkReady": ready,
+      "DAS_autopilotState": 6 if active else 1,
+      "DAS_autoparkWaitingForBrake": active,
+      "DAS_statusCounter": self.cnt_autopark_ready % 16,
+    }
+    self.__class__.cnt_autopark_ready += 1
+    return self.packer.make_can_msg_safety("DAS_status", bus, values)
 
   def _long_control_msg(self, set_speed, acc_state=0, jerk_limits=(0, 0), accel_limits=(0, 0), aeb_event=0, bus=0):
     values = {
@@ -296,6 +308,204 @@ class TestTeslaSafetyBase(common.CarSafetyTest, common.AngleSteeringSafetyTest, 
     self.assertEqual(0, self.safety.safety_fwd_hook(2, lkas_msg_cam.addr))
     self.assertFalse(self._tx(no_lkas_msg))
 
+  def test_stock_autopark_passthrough(self):
+    op_inactive_msg = self._angle_cmd_msg(0, state=False)
+    stock_addrs = (MSG_DAS_steeringControl, MSG_APS_eacMonitor, MSG_DAS_Control)
+
+    def reset_autopark_state():
+      self._reset_safety_hooks()
+      self.safety.set_timer(0)
+      # Tesla safety deliberately assumes legacy Summon/Autopark is active on
+      # startup until the first low-frequency DI_state message arrives.
+      self.assertEqual(1, self._rx(self._pcm_status_msg(False)))
+      self.assertEqual(1, self._rx(self._vehicle_moving_msg(0)))
+
+    def assert_normal_forwarding():
+      self.assertEqual(-1, self.safety.safety_fwd_hook(2, MSG_DAS_steeringControl))
+      self.assertEqual(-1, self.safety.safety_fwd_hook(2, MSG_APS_eacMonitor))
+      self.assertEqual(-1 if self.LONGITUDINAL else 0, self.safety.safety_fwd_hook(2, MSG_DAS_Control))
+
+    def assert_stock_passthrough():
+      for addr in stock_addrs:
+        self.assertEqual(0, self.safety.safety_fwd_hook(2, addr))
+      self.assertFalse(self._tx(op_inactive_msg))
+
+    reset_autopark_state()
+    assert_normal_forwarding()
+    self.assertTrue(self._tx(op_inactive_msg))
+
+    # This implementation is deliberately limited to the FSD14 signal set
+    # observed on the test vehicle. Legacy Tesla firmware remains unchanged.
+    if not self.FSD14:
+      self.assertEqual(1, self._rx(self._autopark_status_msg(True)))
+      assert_normal_forwarding()
+      self.assertTrue(self._tx(op_inactive_msg))
+      return
+
+    # The default vehicle_moving value is false after safety initialization,
+    # but PREARM must wait for a fresh, validated ESP_B vehicle-state frame.
+    self._reset_safety_hooks()
+    self.safety.set_timer(0)
+    self.assertEqual(1, self._rx(self._pcm_status_msg(False)))
+    self.assertEqual(1, self._rx(self._autopark_status_msg(True)))
+    assert_normal_forwarding()
+    self.assertEqual(1, self._rx(self._vehicle_moving_msg(0)))
+    assert_stock_passthrough()
+
+    # A previously observed standstill expires quickly. This prevents stale
+    # vehicle state from opening or keeping PREARM active.
+    reset_autopark_state()
+    self.assertEqual(1, self._rx(self._autopark_status_msg(True)))
+    assert_stock_passthrough()
+    self.safety.set_timer(100001)
+    assert_normal_forwarding()
+    self.assertTrue(self._tx(op_inactive_msg))
+
+    # An invalid DAS_status checksum must not authorize PREARM.
+    reset_autopark_state()
+    invalid_ready_msg = self._autopark_status_msg(True)
+    invalid_ready_msg[0].data[7] ^= 1
+    self.assertEqual(0, self._rx(invalid_ready_msg))
+    assert_normal_forwarding()
+    self.assertTrue(self._tx(op_inactive_msg))
+
+    # DAS_status must also pass the rolling-counter check before it can affect
+    # the state machine.
+    reset_autopark_state()
+    static_status_msg = self.packer.make_can_msg_safety("DAS_status", 2, {
+      "DAS_autoparkReady": False,
+      "DAS_autopilotState": 1,
+      "DAS_autoparkWaitingForBrake": False,
+      "DAS_statusCounter": 1,
+    })
+    self.assertEqual(1, self._rx(static_status_msg))
+    for i in range(MAX_WRONG_COUNTERS + 1):
+      should_rx = i + 1 < MAX_WRONG_COUNTERS
+      self.assertEqual(should_rx, self._rx(static_status_msg))
+    assert_normal_forwarding()
+
+    # DAS_status is sourced from the camera bus. A duplicate seen on another
+    # bus must not authorize PREARM.
+    reset_autopark_state()
+    self.assertEqual(1, self._rx(self._autopark_status_msg(True, bus=0)))
+    assert_normal_forwarding()
+
+    # Readiness while moving does not open passthrough. It may PREARM only
+    # after the validated standstill signal arrives while readiness is fresh.
+    reset_autopark_state()
+    self.safety.set_timer(0)
+    self.assertEqual(1, self._rx(self._vehicle_moving_msg(1)))
+    self.assertEqual(1, self._rx(self._autopark_status_msg(True)))
+    assert_normal_forwarding()
+    self.assertEqual(1, self._rx(self._vehicle_moving_msg(0)))
+    assert_stock_passthrough()
+
+    # PREARM expires after one second without a fresh readiness status.
+    self.safety.set_timer(1000001)
+    assert_normal_forwarding()
+    self.assertTrue(self._tx(op_inactive_msg))
+
+    # A validated ready=false also closes PREARM before activation.
+    reset_autopark_state()
+    self.assertEqual(1, self._rx(self._autopark_status_msg(True)))
+    assert_stock_passthrough()
+    self.assertEqual(1, self._rx(self._autopark_status_msg(False)))
+    assert_normal_forwarding()
+
+    # Neither control channel may be active when PREARM begins. Disabling a
+    # channel later is not enough; a new validated readiness frame is required.
+    for lateral_only in (False, True):
+      reset_autopark_state()
+      if lateral_only:
+        self.safety.set_controls_allowed_lateral(True)
+      else:
+        self.safety.set_controls_allowed(True)
+      self.assertEqual(1, self._rx(self._autopark_status_msg(True)))
+      assert_normal_forwarding()
+      self.safety.set_controls_allowed(False)
+      self.safety.set_controls_allowed_lateral(False)
+      assert_normal_forwarding()
+      self.assertEqual(1, self._rx(self._autopark_status_msg(True)))
+      assert_stock_passthrough()
+
+    # ACTIVE requires both state 6 and WaitingForBrake on a fresh rising edge.
+    # State 6 alone can also describe stock Autopilot/FSD and must not latch.
+    reset_autopark_state()
+    self.safety.set_timer(0)
+    self.assertEqual(1, self._rx(self._autopark_status_msg(True)))
+    assert_stock_passthrough()
+    state6_without_brake = self.packer.make_can_msg_safety("DAS_status", 2, {
+      "DAS_autoparkReady": True,
+      "DAS_autopilotState": 6,
+      "DAS_autoparkWaitingForBrake": False,
+      "DAS_statusCounter": self.cnt_autopark_ready % 16,
+    })
+    self.__class__.cnt_autopark_ready += 1
+    self.assertEqual(1, self._rx(state6_without_brake))
+    self.safety.set_timer(1000001)
+    assert_normal_forwarding()
+
+    # A state-6 request first observed while controls are active must never be
+    # accepted later without a complete inactive state and a new rising edge.
+    reset_autopark_state()
+    self.safety.set_controls_allowed(True)
+    self.assertEqual(1, self._rx(self._autopark_status_msg(True, active=True)))
+    assert_normal_forwarding()
+    self.safety.set_controls_allowed(False)
+    self.assertEqual(1, self._rx(self._autopark_status_msg(True, active=True)))
+    assert_normal_forwarding()
+
+    # Normal ACTIVE lifecycle: stock controls all three paths in TACC and
+    # longitudinal modes, and host TX remains blocked through brake and motion.
+    reset_autopark_state()
+    self.safety.set_timer(0)
+    self.assertEqual(1, self._rx(self._autopark_status_msg(True)))
+    assert_stock_passthrough()
+    self.safety.set_timer(100000)
+    self.assertEqual(1, self._rx(self._autopark_status_msg(True, active=True)))
+    assert_stock_passthrough()
+    self.safety.set_timer(500000)
+    self.assertEqual(1, self._rx(self._autopark_status_msg(True, active=True)))
+    assert_stock_passthrough()
+
+    # Tesla cruise must not re-enable openpilot during an active stock maneuver.
+    self.assertEqual(1, self._rx(self._pcm_status_msg(True)))
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertEqual(1, self._rx(self._user_brake_msg(True)))
+    self.assertEqual(1, self._rx(self._vehicle_moving_msg(1)))
+    assert_stock_passthrough()
+
+    # Require two validated inactive statuses before closing passthrough.
+    self.assertEqual(1, self._rx(self._autopark_status_msg(False)))
+    assert_stock_passthrough()
+    self.assertEqual(1, self._rx(self._autopark_status_msg(False)))
+    assert_normal_forwarding()
+    self.assertFalse(self.safety.get_controls_allowed())
+
+    # A cruise state held through Autopark cannot silently resume controls.
+    self.assertEqual(1, self._rx(self._pcm_status_msg(True)))
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertEqual(1, self._rx(self._vehicle_moving_msg(0)))
+    self.assertEqual(1, self._rx(self._user_brake_msg(False)))
+    self.assertEqual(1, self._rx(self._pcm_status_msg(False)))
+    self.assertEqual(1, self._rx(self._pcm_status_msg(True)))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+    # If DAS_status times out during ACTIVE, fail into permanent stock-pass /
+    # host-blocked hold rather than resuming host control mid-maneuver.
+    reset_autopark_state()
+    self.safety.set_timer(0)
+    self.assertEqual(1, self._rx(self._autopark_status_msg(True)))
+    self.safety.set_timer(100000)
+    self.assertEqual(1, self._rx(self._autopark_status_msg(True, active=True)))
+    self.safety.set_timer(1600001)
+    assert_stock_passthrough()
+    self.assertEqual(1, self._rx(self._autopark_status_msg(False)))
+    self.assertEqual(1, self._rx(self._autopark_status_msg(False)))
+    assert_stock_passthrough()
+    reset_autopark_state()
+    assert_normal_forwarding()
+
   def test_angle_cmd_when_enabled(self):
     # We properly test lateral acceleration and jerk below
     pass
@@ -405,6 +615,7 @@ class TestTeslaStockSafety(TestTeslaSafetyBase):
 
 class TestTeslaFSD14StockSafety(TestTeslaStockSafety):
   SAFETY_PARAM = TeslaSafetyFlags.FSD_14
+  FSD14 = True
 
 
 class TestTeslaLongitudinalSafety(TestTeslaSafetyBase):
@@ -457,6 +668,7 @@ class TestTeslaLongitudinalSafety(TestTeslaSafetyBase):
 
 class TestTeslaFSD14LongitudinalSafety(TestTeslaLongitudinalSafety):
   SAFETY_PARAM = TeslaSafetyFlags.LONG_CONTROL | TeslaSafetyFlags.FSD_14
+  FSD14 = True
 
 
 class TestTeslaIgnition(unittest.TestCase):

@@ -11,6 +11,7 @@
   {.msg = {{0x118, 0, 8, 100U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},  /* DI_systemStatus (gas pedal) */                  \
   {.msg = {{0x145, 0, 8, 50U, .max_counter = 15U}, { 0 }, { 0 }}},                                /* ESP_status (brakes) */                          \
   {.msg = {{0x286, 0, 8, 10U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},   /* DI_state (acc state) */                         \
+  {.msg = {{0x39b, 2, 8, 2U, .max_counter = 15U, .ignore_quality_flag = true, .ignore_frequency_check = true}, { 0 }, { 0 }}}, /* DAS_status */     \
   {.msg = {{0x311, 0, 7, 10U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},   /* UI_warning (blinkers, buckle switch & doors) */ \
 
 #define TESLA_VEHICLE_BUS_ADDR_CHECK \
@@ -24,6 +25,26 @@ static bool tesla_stock_aeb = false;
 // TODO: Only LKAS (non-emergency) is currently supported since we've only seen it
 static bool tesla_stock_lkas = false;
 static bool tesla_stock_lkas_prev = false;
+
+typedef enum {
+  TESLA_STOCK_AUTOPARK_OFF,
+  TESLA_STOCK_AUTOPARK_PREARM,
+  TESLA_STOCK_AUTOPARK_ACTIVE,
+  TESLA_STOCK_AUTOPARK_FAULT_HOLD,
+} TeslaStockAutoparkState;
+
+// Vision Autopark does not expose the touchscreen press on a CAN signal we
+// receive. Open a short stock passthrough window only after the car advertises
+// Autopark readiness while stopped and both openpilot control channels are off.
+static TeslaStockAutoparkState tesla_stock_autopark_state = TESLA_STOCK_AUTOPARK_OFF;
+static bool tesla_autopark_ready = false;
+static uint32_t tesla_autopark_ready_ts = 0U;
+static uint32_t tesla_autopark_status_ts = 0U;
+static uint8_t tesla_autopark_exit_count = 0U;
+static bool tesla_autopark_active_prev = false;
+static bool tesla_autopark_require_cruise_off = false;
+static bool tesla_vehicle_state_seen = false;
+static uint32_t tesla_vehicle_state_ts = 0U;
 
 // Only Summon is currently supported due to Autopark not setting Autopark state properly
 static bool tesla_autopark = false;
@@ -51,6 +72,9 @@ static uint8_t tesla_get_counter(const CANPacket_t *msg) {
   } else if (msg->addr == 0x370U) {
     // Signal: EPAS3S_sysStatusCounter
     cnt = msg->data[6] & 0x0FU;
+  } else if (msg->addr == 0x39bU) {
+    // Signal: DAS_statusCounter
+    cnt = msg->data[6] >> 4;
   } else {
   }
   return cnt;
@@ -58,8 +82,8 @@ static uint8_t tesla_get_counter(const CANPacket_t *msg) {
 
 static int _tesla_get_checksum_byte(const int addr) {
   int checksum_byte = -1;
-  if ((addr == 0x370) || (addr == 0x2b9) || (addr == 0x155)) {
-    // Signal: EPAS3S_sysStatusChecksum, DAS_controlChecksum, ESP_wheelRotationChecksum
+  if ((addr == 0x370) || (addr == 0x2b9) || (addr == 0x155) || (addr == 0x39b)) {
+    // Signal: EPAS3S_sysStatusChecksum, DAS_controlChecksum, ESP_wheelRotationChecksum, DAS_statusChecksum
     checksum_byte = 7;
   } else if (addr == 0x488) {
     // Signal: DAS_steeringControlChecksum
@@ -122,6 +146,44 @@ static int tesla_get_steer_ctrl_type(const int ctrl_type) {
     }
   }
   return steer_ctrl_type;
+}
+
+static bool tesla_stock_autopark_passthrough(void) {
+  const uint32_t now = microsecond_timer_get();
+  const uint32_t PREARM_TIMEOUT = 1000000U;
+  const uint32_t VEHICLE_STATE_TIMEOUT = 100000U;
+  const uint32_t ACTIVE_STATUS_TIMEOUT = 1500000U;
+
+  if (tesla_stock_autopark_state == TESLA_STOCK_AUTOPARK_PREARM) {
+    const bool ready_stale = safety_get_ts_elapsed(now, tesla_autopark_ready_ts) > PREARM_TIMEOUT;
+    const bool vehicle_state_stale = safety_get_ts_elapsed(now, tesla_vehicle_state_ts) > VEHICLE_STATE_TIMEOUT;
+    if (!tesla_autopark_ready || ready_stale || !tesla_vehicle_state_seen || vehicle_state_stale || vehicle_moving ||
+        controls_allowed || controls_allowed_lateral) {
+      tesla_stock_autopark_state = TESLA_STOCK_AUTOPARK_OFF;
+    }
+  } else if (tesla_stock_autopark_state == TESLA_STOCK_AUTOPARK_ACTIVE) {
+    if (safety_get_ts_elapsed(now, tesla_autopark_status_ts) > ACTIVE_STATUS_TIMEOUT) {
+      // Never resume host control after losing the active Autopark status.
+      // Keep stock passthrough until safety mode reinitialization.
+      tesla_stock_autopark_state = TESLA_STOCK_AUTOPARK_FAULT_HOLD;
+    }
+  } else {
+  }
+
+  return tesla_stock_autopark_state != TESLA_STOCK_AUTOPARK_OFF;
+}
+
+static void tesla_try_enter_autopark_prearm(void) {
+  const uint32_t PREARM_TIMEOUT = 1000000U;
+  const uint32_t VEHICLE_STATE_TIMEOUT = 100000U;
+  const uint32_t now = microsecond_timer_get();
+  const bool ready_fresh = safety_get_ts_elapsed(now, tesla_autopark_ready_ts) <= PREARM_TIMEOUT;
+  const bool vehicle_state_fresh = safety_get_ts_elapsed(now, tesla_vehicle_state_ts) <= VEHICLE_STATE_TIMEOUT;
+
+  if ((tesla_stock_autopark_state == TESLA_STOCK_AUTOPARK_OFF) && tesla_autopark_ready && ready_fresh && tesla_vehicle_state_seen &&
+      vehicle_state_fresh && !vehicle_moving && !(controls_allowed || controls_allowed_lateral) && !tesla_autopark_active_prev) {
+    tesla_stock_autopark_state = TESLA_STOCK_AUTOPARK_PREARM;
+  }
 }
 
 static void tesla_rx_hook(const CANPacket_t *msg) {
@@ -189,13 +251,21 @@ static void tesla_rx_hook(const CANPacket_t *msg) {
                             (cruise_state == 4) ||  // OVERRIDE
                             (cruise_state == 6) ||  // PRE_FAULT
                             (cruise_state == 7);    // PRE_CANCEL
-      cruise_engaged = cruise_engaged && !tesla_autopark;
+
+      const bool stock_autopark_passthrough = tesla_stock_autopark_passthrough();
+      if (tesla_autopark_require_cruise_off && !cruise_engaged) {
+        tesla_autopark_require_cruise_off = false;
+      }
+      cruise_engaged = cruise_engaged && !tesla_autopark && !stock_autopark_passthrough && !tesla_autopark_require_cruise_off;
 
       pcm_cruise_check(cruise_engaged);
     }
 
     if (msg->addr == 0x155U) {
       vehicle_moving = !GET_BIT(msg, 41U);  // ESP_vehicleStandstillSts
+      tesla_vehicle_state_seen = true;
+      tesla_vehicle_state_ts = microsecond_timer_get();
+      tesla_try_enter_autopark_prearm();
     }
   }
 
@@ -206,6 +276,37 @@ static void tesla_rx_hook(const CANPacket_t *msg) {
   }
 
   if (msg->bus == 2U) {
+    // DAS_status is 2 Hz on the camera bus on FSD14. This message is
+    // checksum/counter validated by the common RX checks.
+    if ((msg->addr == 0x39bU) && tesla_fsd_14) {
+      tesla_autopark_ready = (msg->data[3] & 0x01U) != 0U;
+      tesla_autopark_ready_ts = microsecond_timer_get();
+      tesla_autopark_status_ts = tesla_autopark_ready_ts;
+      tesla_try_enter_autopark_prearm();
+
+      const int autopilot_state = msg->data[0] & 0x0FU;  // DAS_autopilotState
+      const bool waiting_for_brake = (msg->data[3] & 0x04U) != 0U;  // DAS_autoparkWaitingForBrake
+      const bool autopark_active_now = (autopilot_state == 6) && waiting_for_brake;
+
+      if (autopark_active_now && !tesla_autopark_active_prev &&
+          (tesla_stock_autopark_state == TESLA_STOCK_AUTOPARK_PREARM)) {
+        tesla_stock_autopark_state = TESLA_STOCK_AUTOPARK_ACTIVE;
+        tesla_autopark_exit_count = 0U;
+        tesla_autopark_require_cruise_off = true;
+      } else if ((tesla_stock_autopark_state == TESLA_STOCK_AUTOPARK_ACTIVE) && !autopark_active_now) {
+        tesla_autopark_exit_count += 1U;
+        if (tesla_autopark_exit_count >= 2U) {
+          tesla_stock_autopark_state = TESLA_STOCK_AUTOPARK_OFF;
+          tesla_autopark_exit_count = 0U;
+        }
+      } else if (autopark_active_now && (tesla_stock_autopark_state == TESLA_STOCK_AUTOPARK_ACTIVE)) {
+        tesla_autopark_exit_count = 0U;
+      } else {
+      }
+      tesla_autopark_active_prev = autopark_active_now;
+      (void)tesla_stock_autopark_passthrough();
+    }
+
     // DAS_control
     if (msg->addr == 0x2b9U) {
       // "AEB_ACTIVE"
@@ -254,7 +355,7 @@ static bool tesla_tx_hook(const CANPacket_t *msg) {
   bool violation = false;
 
   // Don't send any messages when Autopark is active
-  if (tesla_autopark) {
+  if (tesla_autopark || tesla_stock_autopark_passthrough()) {
     violation = true;
   }
 
@@ -336,7 +437,7 @@ static bool tesla_fwd_hook(int bus_num, int addr) {
   bool block_msg = false;
 
   if (bus_num == 2) {
-    if (!tesla_autopark) {
+    if (!tesla_autopark && !tesla_stock_autopark_passthrough()) {
       // APS_eacMonitor
       if (addr == 0x27d) {
         block_msg = true;
@@ -386,6 +487,15 @@ static safety_config tesla_init(uint16_t param) {
   tesla_stock_aeb = false;
   tesla_stock_lkas = false;
   tesla_stock_lkas_prev = false;
+  tesla_stock_autopark_state = TESLA_STOCK_AUTOPARK_OFF;
+  tesla_autopark_ready = false;
+  tesla_autopark_ready_ts = 0U;
+  tesla_autopark_status_ts = 0U;
+  tesla_autopark_exit_count = 0U;
+  tesla_autopark_active_prev = false;
+  tesla_autopark_require_cruise_off = false;
+  tesla_vehicle_state_seen = false;
+  tesla_vehicle_state_ts = 0U;
   // we need to assume Autopark/Summon on startup since DI_state is a low freq msg.
   // this is so that we don't fault if starting while these systems are active
   tesla_autopark = true;
