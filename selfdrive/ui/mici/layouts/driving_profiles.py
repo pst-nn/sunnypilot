@@ -41,7 +41,7 @@ class DrivingProfileHomeButton(Widget):
   def __init__(self):
     super().__init__()
     self.set_rect(rl.Rectangle(0, 0, self.WIDTH, self.HEIGHT))
-    self._feedback_message: str | None = None
+    self._feedback_was_started: bool | None = None
     self._feedback_until = 0.0
 
     # MiciHomeLayout routes this badge to profiles and the remaining home screen
@@ -49,17 +49,21 @@ class DrivingProfileHomeButton(Widget):
     self.set_touch_valid_callback(lambda: False)
 
   def show_applied_feedback(self, was_started: bool):
-    self._feedback_message = "RESTARTING CONTROLS" if was_started else "SAVED / NEXT DRIVE"
+    self._feedback_was_started = was_started
     self._feedback_until = rl.get_time() + self.FEEDBACK_SECONDS
 
   def _render(self, _):
-    bg = rl.Color(46, 46, 49, 255)
+    feedback_active = self._feedback_was_started is not None and rl.get_time() < self._feedback_until
+    bg = rl.Color(31, 91, 58, 255) if feedback_active else rl.Color(46, 46, 49, 255)
     rl.draw_rectangle_rounded(self._rect, 0.35, 8, bg)
     rl.draw_rectangle_rounded_lines_ex(self._rect, 0.35, 8, 1, rl.Color(255, 255, 255, 35))
 
-    label = get_driving_profile_label(ui_state.params)
-    feedback_active = self._feedback_message is not None and rl.get_time() < self._feedback_until
-    kicker = self._feedback_message if feedback_active else "DRIVING PROFILE"
+    if feedback_active:
+      kicker = "PROFILE APPLIED" if self._feedback_was_started else "PROFILE SAVED"
+      label = "RESTARTING" if self._feedback_was_started else "NEXT DRIVE"
+    else:
+      kicker = "DRIVING PROFILE"
+      label = get_driving_profile_label(ui_state.params)
     kicker_rect = rl.Rectangle(self._rect.x + 14, self._rect.y + 1, self._rect.width - 48, 16)
     profile_rect = rl.Rectangle(self._rect.x + 14, self._rect.y + 15, self._rect.width - 50, 33)
     arrow_rect = rl.Rectangle(self._rect.x + self._rect.width - 34, self._rect.y, 24, self._rect.height)
@@ -180,5 +184,7 @@ class DrivingProfilesLayout(NavScroller):
       cloudlog.exception("driving profile UI refresh failed")
     self._refresh_cards()
     if self._profile_applied_callback:
-      self._profile_applied_callback(was_started)
-    self.dismiss()
+      callback = self._profile_applied_callback
+      self.dismiss(lambda: callback(was_started))
+    else:
+      self.dismiss()

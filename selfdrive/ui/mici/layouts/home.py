@@ -16,6 +16,7 @@ from openpilot.system.version import RELEASE_BRANCHES
 HEAD_BUTTON_FONT_SIZE = 40
 HOME_PADDING = 8
 ALERTS_ZONE_WIDTH = 180
+PROFILE_FOOTER_GAP = 12
 
 NetworkType = log.DeviceState.NetworkType
 
@@ -214,6 +215,8 @@ class MiciHomeLayout(Widget):
 
   def _render(self, _):
     profiles_available = driving_profiles_available(ui_state.CP)
+    has_alerts = bool(self._alert_count_callback and self._alert_count_callback() > 0)
+    profile_in_footer = profiles_available and not has_alerts and not ui_state.usbgpu and not ui_state.is_body
 
     # TODO: why is there extra space here to get it to be flush?
     text_pos = rl.Vector2(self.rect.x - 2 + HOME_PADDING, self.rect.y - 16)
@@ -244,9 +247,12 @@ class MiciHomeLayout(Widget):
         self._version_commit_label.render()
 
     if profiles_available:
+      profile_y = self.rect.y + self.rect.height - self._profile_button.rect.height - HOME_PADDING
+      if not profile_in_footer:
+        profile_y -= 48
       self._profile_button.set_position(
         self.rect.x + self.rect.width - self._profile_button.rect.width - HOME_PADDING,
-        self.rect.y + self.rect.height - 48 - self._profile_button.rect.height - HOME_PADDING,
+        profile_y,
       )
       self._profile_button.render()
 
@@ -257,7 +263,10 @@ class MiciHomeLayout(Widget):
     self._mic_icon.set_visible(ui_state.recording_audio)
     self._body_icon.set_visible(ui_state.is_body)
 
-    footer_rect = rl.Rectangle(self.rect.x + HOME_PADDING, self.rect.y + self.rect.height - 48, self.rect.width - HOME_PADDING, 48)
+    footer_width = self.rect.width - HOME_PADDING
+    if profile_in_footer:
+      footer_width = self._profile_button.rect.x - self.rect.x - HOME_PADDING - PROFILE_FOOTER_GAP
+    footer_rect = rl.Rectangle(self.rect.x + HOME_PADDING, self.rect.y + self.rect.height - 48, footer_width, 48)
     self._status_bar_layout.render(footer_rect)
 
     # TODO: add alignment to hboxlayout and add to there
