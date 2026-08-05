@@ -16,7 +16,6 @@ from openpilot.system.version import RELEASE_BRANCHES
 HEAD_BUTTON_FONT_SIZE = 40
 HOME_PADDING = 8
 ALERTS_ZONE_WIDTH = 180
-SETTINGS_TOUCH_PADDING = 18
 
 NetworkType = log.DeviceState.NetworkType
 
@@ -176,6 +175,12 @@ class MiciHomeLayout(Widget):
     self._alerts_pill.set_alert_count_callback(alert_count_callback, max_severity_callback)
 
   def _handle_mouse_release(self, mouse_pos: MousePos):
+    profiles_available = driving_profiles_available(ui_state.CP)
+    if profiles_available and rl.check_collision_point_rec(mouse_pos, self._profile_button.rect):
+      if self._on_profiles_click:
+        self._on_profiles_click()
+      return
+
     relative_x = mouse_pos.x - self.rect.x
     has_alerts = self._alert_count_callback and self._alert_count_callback() > 0
     if has_alerts and relative_x > self.rect.width - ALERTS_ZONE_WIDTH:
@@ -183,19 +188,11 @@ class MiciHomeLayout(Widget):
         self._on_alerts_click()
       return
 
-    settings_touch_rect = rl.Rectangle(
-      self._settings_icon.rect.x - SETTINGS_TOUCH_PADDING,
-      self._settings_icon.rect.y - SETTINGS_TOUCH_PADDING,
-      self._settings_icon.rect.width + SETTINGS_TOUCH_PADDING * 2,
-      self._settings_icon.rect.height + SETTINGS_TOUCH_PADDING * 2,
-    )
-    if rl.check_collision_point_rec(mouse_pos, settings_touch_rect):
-      if self._on_settings_click:
-        self._on_settings_click()
-    elif driving_profiles_available(ui_state.CP) and self._on_profiles_click:
-      self._on_profiles_click()
-    elif self._on_settings_click:
+    if self._on_settings_click:
       self._on_settings_click()
+
+  def show_profile_applied_feedback(self, was_started: bool):
+    self._profile_button.show_applied_feedback(was_started)
 
   def _get_version_text(self) -> tuple[str, str, str, str] | None:
     version = ui_state.params.get("Version")
@@ -248,8 +245,8 @@ class MiciHomeLayout(Widget):
 
     if profiles_available:
       self._profile_button.set_position(
-        self.rect.x + (self.rect.width - self._profile_button.rect.width) / 2,
-        self.rect.y + 132,
+        self.rect.x + self.rect.width - self._profile_button.rect.width - HOME_PADDING,
+        self.rect.y + self.rect.height - 48 - self._profile_button.rect.height - HOME_PADDING,
       )
       self._profile_button.render()
 
