@@ -16,6 +16,18 @@ def is_fsd14_autopark(flags: int, autopilot_state: int, waiting_for_brake: bool)
   return bool(flags & TeslaFlags.FSD_14) and autopilot_state == 6 and waiting_for_brake
 
 
+def is_fsd14_stock_autopilot(flags: int, autopilot_state: int, waiting_for_brake: bool) -> bool:
+  return bool(flags & TeslaFlags.FSD_14) and autopilot_state in (3, 4, 5, 6) and not is_fsd14_autopark(flags, autopilot_state, waiting_for_brake)
+
+
+def is_stock_lkas(flags: int, primary_type: int, secondary_type: int) -> bool:
+  primary_lkas = primary_type == get_steer_ctrl_type(flags, 2)
+  # FSD 14.26.8 on the tested Model Y reports stock steering ownership in
+  # byte 2 bits 5:4 while the legacy bits 7:6 stay at NONE.
+  fsd14_secondary_lkas = bool(flags & TeslaFlags.FSD_14) and secondary_type == 2
+  return primary_lkas or fsd14_secondary_lkas
+
+
 def invalid_lkas_setting(flags: int, autosteer_enabled: bool) -> bool:
   return not (flags & TeslaFlags.FSD_14) and autosteer_enabled
 
@@ -49,12 +61,12 @@ class CarState(CarStateBase, CarStateExt):
     self.autopark_prev = autopark_now
     self.cruise_enabled_prev = cruise_enabled
 
-  def update_stock_handoff_state(self, autopilot_request: bool, stock_lkas: bool, autopark: bool,
+  def update_stock_handoff_state(self, autopilot_request: bool, stock_lkas: bool, stock_autopilot: bool, autopark: bool,
                                  cruise_enabled: bool) -> bool:
     request_rising = autopilot_request and not self.autopilot_request_prev
     self.autopilot_request_prev = autopilot_request
 
-    stock_active = stock_lkas or autopark
+    stock_active = stock_lkas or stock_autopilot or autopark
     if request_rising or stock_active:
       self.stock_handoff_active = True
       self.stock_handoff_grace_frames = int(2.0 / DT_CTRL)
@@ -122,13 +134,15 @@ class CarState(CarStateBase, CarStateExt):
     self.update_autopark_state(autopark_state, cruise_enabled)
 
     fsd14 = bool(self.CP.flags & TeslaFlags.FSD_14)
-    lkas_ctrl_type = get_steer_ctrl_type(self.CP.flags, 2)
-    stock_lkas = cp_ap_party.vl["DAS_steeringControl"]["DAS_steeringControlType"] == lkas_ctrl_type
-    fsd14_autopark = is_fsd14_autopark(self.CP.flags,
-                                       cp_ap_party.vl["DAS_status"]["DAS_autopilotState"],
-                                       cp_ap_party.vl["DAS_status"]["DAS_autoparkWaitingForBrake"] == 1)
+    autopilot_state = cp_ap_party.vl["DAS_status"]["DAS_autopilotState"]
+    waiting_for_brake = cp_ap_party.vl["DAS_status"]["DAS_autoparkWaitingForBrake"] == 1
+    stock_lkas = is_stock_lkas(self.CP.flags,
+                               cp_ap_party.vl["DAS_steeringControl"]["DAS_steeringControlType"],
+                               cp_ap_party.vl["DAS_steeringControl"]["DAS_steeringControlType2"])
+    fsd14_autopark = is_fsd14_autopark(self.CP.flags, autopilot_state, waiting_for_brake)
+    fsd14_stock_autopilot = is_fsd14_stock_autopilot(self.CP.flags, autopilot_state, waiting_for_brake)
     autopilot_request = fsd14 and cp_party.vl["DI_state"]["DI_autopilotRequest"] == 1
-    stock_handoff = fsd14 and self.update_stock_handoff_state(autopilot_request, stock_lkas,
+    stock_handoff = fsd14 and self.update_stock_handoff_state(autopilot_request, stock_lkas, fsd14_stock_autopilot,
                                                               self.autopark or fsd14_autopark, cruise_enabled)
 
     # Match Panda's fail-closed stock ADAS handoff. During FSD14 Autopark or

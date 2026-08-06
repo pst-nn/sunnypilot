@@ -130,10 +130,13 @@ class TestTeslaSafetyBase(common.CarSafetyTest, common.AngleSteeringSafetyTest, 
     return self.packer.make_can_msg_safety("DI_state", 0, values)
 
   def _autopark_status_msg(self, ready, active=False, bus=2):
+    return self._das_status_msg(6 if active else 1, active, ready, bus)
+
+  def _das_status_msg(self, autopilot_state=1, waiting_for_brake=False, autopark_ready=False, bus=2):
     values = {
-      "DAS_autoparkReady": ready,
-      "DAS_autopilotState": 6 if active else 1,
-      "DAS_autoparkWaitingForBrake": active,
+      "DAS_autoparkReady": autopark_ready,
+      "DAS_autopilotState": autopilot_state,
+      "DAS_autoparkWaitingForBrake": waiting_for_brake,
       "DAS_statusCounter": self.cnt_autopark_ready % 16,
     }
     self.__class__.cnt_autopark_ready += 1
@@ -375,6 +378,45 @@ class TestTeslaSafetyBase(common.CarSafetyTest, common.AngleSteeringSafetyTest, 
     self.assertEqual(1, self._rx(self._pcm_status_msg(True)))
     self.assertFalse(self.safety.get_controls_allowed())
 
+    # Regression from the 17:08 route: FSD 14.26.8 kept the legacy field at
+    # NONE and reported stock ownership as value 2 in byte 2 bits 5:4.
+    reset_handoff()
+    self.assertEqual(1, self._rx(self._pcm_status_msg(True)))
+    self.assertTrue(self.safety.get_controls_allowed())
+    observed_tacc = libsafety_py.make_CANPacket(MSG_DAS_steeringControl, 2, b'\x3f\xf5\x04\xc4')
+    self.assertEqual(1, self._rx(observed_tacc))
+    self.assertTrue(self.safety.get_controls_allowed())
+    assert_normal_forwarding()
+
+    reset_handoff()
+    self.assertEqual(1, self._rx(self._pcm_status_msg(True)))
+    self.assertTrue(self.safety.get_controls_allowed())
+    observed_stock_ap = libsafety_py.make_CANPacket(MSG_DAS_steeringControl, 2, b'\x40\x27\x2d\x20')
+    self.assertEqual(1, self._rx(observed_stock_ap))
+    assert_stock_passthrough()
+    self.assertEqual(1, self._rx(self._pcm_status_msg(True)))
+    self.assertFalse(self.safety.get_controls_allowed())
+
+    # The validated high-level state is a second fail-closed trigger if the
+    # first steering ownership frame was missed.
+    reset_handoff()
+    self.assertEqual(1, self._rx(self._pcm_status_msg(True)))
+    self.assertEqual(1, self._rx(self._das_status_msg(3)))
+    assert_stock_passthrough()
+    self.assertEqual(1, self._rx(self._pcm_status_msg(True)))
+    self.assertFalse(self.safety.get_controls_allowed())
+
+    # Clearing either ownership signal alone is insufficient. Tesla must
+    # report an inactive DAS state and a complete cruise-off cycle.
+    self.assertEqual(1, self._rx(self._das_status_msg(1)))
+    self.assertEqual(1, self._rx(stock_inactive_msg))
+    assert_stock_passthrough()
+    self.assertEqual(1, self._rx(self._pcm_status_msg(False)))
+    assert_normal_forwarding()
+    self.assertTrue(self._tx(op_inactive_msg))
+    self.assertEqual(1, self._rx(self._pcm_status_msg(True)))
+    self.assertTrue(self.safety.get_controls_allowed())
+
     # A request that never produces cruise or stock steering times out without
     # silently enabling controls, since raw cruise is still off.
     reset_handoff()
@@ -504,8 +546,9 @@ class TestTeslaSafetyBase(common.CarSafetyTest, common.AngleSteeringSafetyTest, 
       self.assertEqual(1, self._rx(self._autopark_status_msg(True)))
       assert_stock_passthrough()
 
-    # ACTIVE requires both state 6 and WaitingForBrake on a fresh rising edge.
-    # State 6 alone can also describe stock Autopilot/FSD and must not latch.
+    # ACTIVE Autopark requires both state 6 and WaitingForBrake on a fresh
+    # rising edge. State 6 alone describes stock FSD and must fail closed into
+    # the stock Autopilot handoff instead of being mistaken for Autopark.
     reset_autopark_state()
     self.safety.set_timer(0)
     self.assertEqual(1, self._rx(self._autopark_status_msg(True)))
@@ -519,7 +562,7 @@ class TestTeslaSafetyBase(common.CarSafetyTest, common.AngleSteeringSafetyTest, 
     self.__class__.cnt_autopark_ready += 1
     self.assertEqual(1, self._rx(state6_without_brake))
     self.safety.set_timer(1000001)
-    assert_normal_forwarding()
+    assert_stock_passthrough()
 
     # A state-6 request first observed while controls are active must never be
     # accepted later without a complete inactive state and a new rising edge.
