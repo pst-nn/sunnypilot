@@ -27,6 +27,7 @@ static bool tesla_stock_lkas = false;
 static bool tesla_stock_lkas_prev = false;
 static bool tesla_stock_autopilot = false;
 static bool tesla_stock_autopilot_cruise_seen = false;
+static bool tesla_stock_autopilot_status_active = false;
 static bool tesla_autopilot_request_prev = false;
 static uint32_t tesla_stock_autopilot_request_ts = 0U;
 
@@ -269,7 +270,7 @@ static void tesla_rx_hook(const CANPacket_t *msg) {
       if (tesla_stock_autopilot && cruise_engaged) {
         tesla_stock_autopilot_cruise_seen = true;
       }
-      if (tesla_stock_autopilot && !autopilot_request && !tesla_stock_lkas_prev) {
+      if (tesla_stock_autopilot && !autopilot_request && !tesla_stock_lkas_prev && !tesla_stock_autopilot_status_active) {
         const bool cruise_cycle_complete = tesla_stock_autopilot_cruise_seen && !cruise_engaged;
         const bool request_timed_out = !tesla_stock_autopilot_cruise_seen &&
           (safety_get_ts_elapsed(microsecond_timer_get(), tesla_stock_autopilot_request_ts) > 2000000U);
@@ -315,6 +316,14 @@ static void tesla_rx_hook(const CANPacket_t *msg) {
       const int autopilot_state = msg->data[0] & 0x0FU;  // DAS_autopilotState
       const bool waiting_for_brake = (msg->data[3] & 0x04U) != 0U;  // DAS_autoparkWaitingForBrake
       const bool autopark_active_now = (autopilot_state == 6) && waiting_for_brake;
+      tesla_stock_autopilot_status_active = (autopilot_state >= 3) && (autopilot_state <= 6) && !autopark_active_now;
+
+      if (tesla_stock_autopilot_status_active) {
+        // Validated DAS_status is a slower fail-closed ownership signal. The
+        // observed FSD 14.26.8 double-stalk sequence reports ACTIVE_NOMINAL (3).
+        tesla_stock_autopilot = true;
+        tesla_stock_autopilot_request_ts = microsecond_timer_get();
+      }
 
       if (autopark_active_now && !tesla_autopark_active_prev &&
           (tesla_stock_autopark_state == TESLA_STOCK_AUTOPARK_PREARM)) {
@@ -343,8 +352,13 @@ static void tesla_rx_hook(const CANPacket_t *msg) {
 
     // DAS_steeringControl
     if (msg->addr == 0x488U) {
-      int steering_control_type = msg->data[2] >> 6;
-      bool tesla_stock_lkas_now = steering_control_type == tesla_get_steer_ctrl_type(2);  // "LANE_KEEP_ASSIST"
+      const int steering_control_type = msg->data[2] >> 6;
+      const int steering_control_type_2 = (msg->data[2] >> 4) & 0x03U;
+      const bool primary_stock_lkas = steering_control_type == tesla_get_steer_ctrl_type(2);
+      // FSD 14.26.8 reports stock ownership in byte 2 bits 5:4 while the
+      // legacy bits 7:6 stay at NONE. Value 2 is LANE_KEEP_ASSIST.
+      const bool secondary_stock_lkas = tesla_fsd_14 && (steering_control_type_2 == 2);
+      const bool tesla_stock_lkas_now = primary_stock_lkas || secondary_stock_lkas;
 
       if (tesla_fsd_14 && tesla_stock_lkas_now && !tesla_stock_lkas_prev) {
         // FSD14 stock Autopilot is allowed to take priority over comma after a
@@ -524,6 +538,7 @@ static safety_config tesla_init(uint16_t param) {
   tesla_stock_lkas_prev = false;
   tesla_stock_autopilot = false;
   tesla_stock_autopilot_cruise_seen = false;
+  tesla_stock_autopilot_status_active = false;
   tesla_autopilot_request_prev = false;
   tesla_stock_autopilot_request_ts = 0U;
   tesla_stock_autopark_state = TESLA_STOCK_AUTOPARK_OFF;
