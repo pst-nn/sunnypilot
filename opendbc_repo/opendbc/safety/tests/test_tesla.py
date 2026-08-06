@@ -121,10 +121,11 @@ class TestTeslaSafetyBase(common.CarSafetyTest, common.AngleSteeringSafetyTest, 
     values = {"DI_accelPedalPos": gas}
     return self.packer.make_can_msg_safety("DI_systemStatus", 0, values)
 
-  def _pcm_status_msg(self, enable, autopark_state=0):
+  def _pcm_status_msg(self, enable, autopark_state=0, autopilot_request=False):
     values = {
       "DI_cruiseState": 2 if enable else 0,
       "DI_autoparkState": autopark_state,
+      "DI_autopilotRequest": autopilot_request,
     }
     return self.packer.make_can_msg_safety("DI_state", 0, values)
 
@@ -307,6 +308,81 @@ class TestTeslaSafetyBase(common.CarSafetyTest, common.AngleSteeringSafetyTest, 
     self.assertEqual(1, self._rx(lkas_msg_cam))
     self.assertEqual(0, self.safety.safety_fwd_hook(2, lkas_msg_cam.addr))
     self.assertFalse(self._tx(no_lkas_msg))
+
+  def test_stock_autopilot_handoff(self):
+    op_inactive_msg = self._angle_cmd_msg(0, state=False)
+    stock_lkas_msg = self._angle_cmd_msg(0, state=self.steer_control_types['LANE_KEEP_ASSIST'], bus=2)
+    stock_inactive_msg = self._angle_cmd_msg(0, state=False, bus=2)
+    stock_addrs = (MSG_DAS_steeringControl, MSG_APS_eacMonitor, MSG_DAS_Control)
+
+    def reset_handoff():
+      self._reset_safety_hooks()
+      self.safety.set_timer(0)
+      self.assertEqual(1, self._rx(self._pcm_status_msg(False)))
+
+    def assert_normal_forwarding():
+      self.assertEqual(-1, self.safety.safety_fwd_hook(2, MSG_DAS_steeringControl))
+      self.assertEqual(-1, self.safety.safety_fwd_hook(2, MSG_APS_eacMonitor))
+      self.assertEqual(-1 if self.LONGITUDINAL else 0, self.safety.safety_fwd_hook(2, MSG_DAS_Control))
+
+    def assert_stock_passthrough():
+      for addr in stock_addrs:
+        self.assertEqual(0, self.safety.safety_fwd_hook(2, addr))
+      self.assertFalse(self._tx(op_inactive_msg))
+
+    reset_handoff()
+    self.assertEqual(1, self._rx(self._pcm_status_msg(True)))
+    self.assertTrue(self.safety.get_controls_allowed())
+    assert_normal_forwarding()
+
+    # Legacy firmware ignores DI_autopilotRequest and preserves the upstream
+    # requirement to disable stock Autosteer in vehicle settings.
+    if not self.FSD14:
+      self.assertEqual(1, self._rx(self._pcm_status_msg(True, autopilot_request=True)))
+      self.assertTrue(self.safety.get_controls_allowed())
+      assert_normal_forwarding()
+      return
+
+    # A double-stalk request transfers all stock paths before stock steering
+    # becomes active, and immediately masks the existing TACC engagement.
+    self.assertEqual(1, self._rx(self._pcm_status_msg(True, autopilot_request=True)))
+    self.assertFalse(self.safety.get_controls_allowed())
+    assert_stock_passthrough()
+
+    # The request pulse may end while stock Autopilot and cruise remain active.
+    self.assertEqual(1, self._rx(self._pcm_status_msg(True)))
+    self.assertEqual(1, self._rx(stock_lkas_msg))
+    self.assertEqual(1, self._rx(stock_inactive_msg))
+    self.assertEqual(1, self._rx(self._pcm_status_msg(True)))
+    self.assertFalse(self.safety.get_controls_allowed())
+    assert_stock_passthrough()
+
+    # Never return to comma merely because stock steering stopped. Tesla must
+    # complete a real cruise-off cycle, followed by a fresh TACC engagement.
+    self.assertEqual(1, self._rx(self._pcm_status_msg(False)))
+    assert_normal_forwarding()
+    self.assertTrue(self._tx(op_inactive_msg))
+    self.assertEqual(1, self._rx(self._pcm_status_msg(True)))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+    # Stock steering is also a fail-closed fallback if the request pulse was
+    # missed. On FSD14 it takes priority even while comma/TACC is active.
+    reset_handoff()
+    self.assertEqual(1, self._rx(self._pcm_status_msg(True)))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertEqual(1, self._rx(stock_lkas_msg))
+    assert_stock_passthrough()
+    self.assertEqual(1, self._rx(self._pcm_status_msg(True)))
+    self.assertFalse(self.safety.get_controls_allowed())
+
+    # A request that never produces cruise or stock steering times out without
+    # silently enabling controls, since raw cruise is still off.
+    reset_handoff()
+    self.assertEqual(1, self._rx(self._pcm_status_msg(False, autopilot_request=True)))
+    assert_stock_passthrough()
+    self.safety.set_timer(2000001)
+    self.assertEqual(1, self._rx(self._pcm_status_msg(False)))
+    assert_normal_forwarding()
 
   def test_stock_autopark_passthrough(self):
     op_inactive_msg = self._angle_cmd_msg(0, state=False)

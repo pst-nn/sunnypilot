@@ -1,12 +1,13 @@
 import re
 import unittest
 
-from opendbc.car import gen_empty_fingerprint
+from opendbc.car import DT_CTRL, gen_empty_fingerprint
 from opendbc.car.structs import CarParams
+from opendbc.car.tesla.carstate import CarState, invalid_lkas_setting, is_fsd14_autopark
 from opendbc.car.tesla.interface import CarInterface
 from opendbc.car.tesla.fingerprints import FW_VERSIONS
 from opendbc.car.tesla.radar_interface import RADAR_START_ADDR
-from opendbc.car.tesla.values import CAR, FSD_14_FW
+from opendbc.car.tesla.values import CAR, FSD_14_FW, TeslaFlags
 
 Ecu = CarParams.Ecu
 
@@ -102,3 +103,50 @@ class TestTeslaFingerprint(unittest.TestCase):
         fingerprint[1][RADAR_START_ADDR] = 8
       CP = CarInterface.get_params(CAR.TESLA_MODEL_X, fingerprint, [], False, False, False)
       assert CP.radarUnavailable  # Always unavailable since no radar DBC
+
+
+class TestTeslaStockAdasHandoff(unittest.TestCase):
+  @staticmethod
+  def _carstate() -> CarState:
+    cs = CarState.__new__(CarState)
+    cs.autopilot_request_prev = False
+    cs.stock_handoff_active = False
+    cs.stock_handoff_cruise_seen = False
+    cs.stock_handoff_grace_frames = 0
+    return cs
+
+  def test_fsd14_autopark_requires_waiting_for_brake(self):
+    self.assertTrue(is_fsd14_autopark(TeslaFlags.FSD_14, 6, True))
+    self.assertFalse(is_fsd14_autopark(TeslaFlags.FSD_14, 6, False))
+    self.assertFalse(is_fsd14_autopark(TeslaFlags.FSD_14, 3, True))
+    self.assertFalse(is_fsd14_autopark(0, 6, True))
+
+  def test_fsd14_allows_autosteer_setting_only_with_handoff_support(self):
+    self.assertFalse(invalid_lkas_setting(TeslaFlags.FSD_14, True))
+    self.assertFalse(invalid_lkas_setting(TeslaFlags.FSD_14, False))
+    self.assertTrue(invalid_lkas_setting(0, True))
+    self.assertFalse(invalid_lkas_setting(0, False))
+
+  def test_request_handoff_latches_through_cruise_cycle(self):
+    cs = self._carstate()
+
+    self.assertTrue(cs.update_stock_handoff_state(True, False, False, False))
+    self.assertTrue(cs.update_stock_handoff_state(False, False, False, False))
+    self.assertTrue(cs.update_stock_handoff_state(False, False, False, True))
+    self.assertTrue(cs.update_stock_handoff_state(False, False, False, True))
+    self.assertFalse(cs.update_stock_handoff_state(False, False, False, False))
+
+  def test_request_without_stock_activation_expires(self):
+    cs = self._carstate()
+    self.assertTrue(cs.update_stock_handoff_state(True, False, False, False))
+
+    for _ in range(int(2.0 / DT_CTRL) - 1):
+      self.assertTrue(cs.update_stock_handoff_state(False, False, False, False))
+    self.assertFalse(cs.update_stock_handoff_state(False, False, False, False))
+
+  def test_stock_activity_refreshes_handoff_without_request(self):
+    cs = self._carstate()
+    self.assertTrue(cs.update_stock_handoff_state(False, True, False, True))
+    self.assertTrue(cs.update_stock_handoff_state(False, True, False, False))
+    self.assertTrue(cs.update_stock_handoff_state(False, False, False, True))
+    self.assertFalse(cs.update_stock_handoff_state(False, False, False, False))

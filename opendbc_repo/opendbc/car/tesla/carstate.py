@@ -1,6 +1,6 @@
 import copy
 from opendbc.can import CANDefine, CANParser
-from opendbc.car import Bus, structs
+from opendbc.car import Bus, DT_CTRL, structs
 from opendbc.car.carlog import carlog
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarStateBase
@@ -10,6 +10,14 @@ from opendbc.car.tesla.values import DBC, CANBUS, GEAR_MAP, STEER_THRESHOLD, Tes
 from opendbc.sunnypilot.car.tesla.carstate_ext import CarStateExt
 
 ButtonType = structs.CarState.ButtonEvent.Type
+
+
+def is_fsd14_autopark(flags: int, autopilot_state: int, waiting_for_brake: bool) -> bool:
+  return bool(flags & TeslaFlags.FSD_14) and autopilot_state == 6 and waiting_for_brake
+
+
+def invalid_lkas_setting(flags: int, autosteer_enabled: bool) -> bool:
+  return not (flags & TeslaFlags.FSD_14) and autosteer_enabled
 
 
 class CarState(CarStateBase, CarStateExt):
@@ -24,6 +32,10 @@ class CarState(CarStateBase, CarStateExt):
     self.cruise_enabled_prev = False
     self.fsd14_error_logged = False
     self.suspected_fsd14 = False
+    self.autopilot_request_prev = False
+    self.stock_handoff_active = False
+    self.stock_handoff_cruise_seen = False
+    self.stock_handoff_grace_frames = 0
 
     self.hands_on_level = 0
     self.das_control = None
@@ -36,6 +48,35 @@ class CarState(CarStateBase, CarStateExt):
       self.autopark = False
     self.autopark_prev = autopark_now
     self.cruise_enabled_prev = cruise_enabled
+
+  def update_stock_handoff_state(self, autopilot_request: bool, stock_lkas: bool, autopark: bool,
+                                 cruise_enabled: bool) -> bool:
+    request_rising = autopilot_request and not self.autopilot_request_prev
+    self.autopilot_request_prev = autopilot_request
+
+    stock_active = stock_lkas or autopark
+    if request_rising or stock_active:
+      self.stock_handoff_active = True
+      self.stock_handoff_grace_frames = int(2.0 / DT_CTRL)
+
+    if self.stock_handoff_active:
+      if cruise_enabled:
+        self.stock_handoff_cruise_seen = True
+
+      if autopilot_request or stock_active:
+        self.stock_handoff_grace_frames = int(2.0 / DT_CTRL)
+      elif not self.stock_handoff_cruise_seen:
+        self.stock_handoff_grace_frames = max(0, self.stock_handoff_grace_frames - 1)
+
+      stock_inactive = not autopilot_request and not stock_active
+      cruise_cycle_complete = stock_inactive and self.stock_handoff_cruise_seen and not cruise_enabled
+      request_timed_out = stock_inactive and not self.stock_handoff_cruise_seen and self.stock_handoff_grace_frames == 0
+      if cruise_cycle_complete or request_timed_out:
+        self.stock_handoff_active = False
+        self.stock_handoff_cruise_seen = False
+        self.stock_handoff_grace_frames = 0
+
+    return self.stock_handoff_active
 
   def update(self, can_parsers) -> tuple[structs.CarState, structs.CarStateSP]:
     cp_party = can_parsers[Bus.party]
@@ -80,13 +121,26 @@ class CarState(CarStateBase, CarStateExt):
     cruise_enabled = cruise_state in ("ENABLED", "STANDSTILL", "OVERRIDE", "PRE_FAULT", "PRE_CANCEL")
     self.update_autopark_state(autopark_state, cruise_enabled)
 
-    # Match panda safety cruise engaged logic
-    ret.cruiseState.enabled = cruise_enabled and not self.autopark
+    fsd14 = bool(self.CP.flags & TeslaFlags.FSD_14)
+    lkas_ctrl_type = get_steer_ctrl_type(self.CP.flags, 2)
+    stock_lkas = cp_ap_party.vl["DAS_steeringControl"]["DAS_steeringControlType"] == lkas_ctrl_type
+    fsd14_autopark = is_fsd14_autopark(self.CP.flags,
+                                       cp_ap_party.vl["DAS_status"]["DAS_autopilotState"],
+                                       cp_ap_party.vl["DAS_status"]["DAS_autoparkWaitingForBrake"] == 1)
+    autopilot_request = fsd14 and cp_party.vl["DI_state"]["DI_autopilotRequest"] == 1
+    stock_handoff = fsd14 and self.update_stock_handoff_state(autopilot_request, stock_lkas,
+                                                              self.autopark or fsd14_autopark, cruise_enabled)
+
+    # Match Panda's fail-closed stock ADAS handoff. During FSD14 Autopark or
+    # stock Autopilot, keep selfdrived disengaged until Tesla cruise has gone
+    # fully off; a held cruise state must never re-enable comma automatically.
+    ret.cruiseState.enabled = cruise_enabled and not self.autopark and not stock_handoff
+    ret.blockPcmEnable = stock_handoff
     if speed_units == "KPH":
       ret.cruiseState.speed = max(cp_party.vl["DI_state"]["DI_digitalSpeed"] * CV.KPH_TO_MS, 1e-3)
     elif speed_units == "MPH":
       ret.cruiseState.speed = max(cp_party.vl["DI_state"]["DI_digitalSpeed"] * CV.MPH_TO_MS, 1e-3)
-    ret.cruiseState.available = cruise_state == "STANDBY" or ret.cruiseState.enabled
+    ret.cruiseState.available = cruise_state == "STANDBY" or cruise_enabled
     ret.cruiseState.standstill = False  # This needs to be false, since we can resume from stop without sending anything special
     ret.standstill = cp_party.vl["ESP_B"]["ESP_vehicleStandstillSts"] == 1
     ret.accFaulted = cruise_state == "FAULT"
@@ -115,13 +169,15 @@ class CarState(CarStateBase, CarStateExt):
     # On FSD 14+, ANGLE_CONTROL behavior changed to allow user winddown while actuating.
     # FSD switched from using ANGLE_CONTROL to LANE_KEEP_ASSIST to likely keep the old steering override disengage logic.
     # LKAS switched from LANE_KEEP_ASSIST to ANGLE_CONTROL to likely allow overriding LKAS events smoothly
-    lkas_ctrl_type = get_steer_ctrl_type(self.CP.flags, 2)
-    ret.stockLkas = cp_ap_party.vl["DAS_steeringControl"]["DAS_steeringControlType"] == lkas_ctrl_type  # LANE_KEEP_ASSIST
+    ret.stockLkas = stock_lkas  # LANE_KEEP_ASSIST
 
     # Stock Autosteer should be off (includes FSD)
     # TODO: find for TESLA_MODEL_X and HW2.5 vehicles
     if not (self.CP.flags & TeslaFlags.MISSING_DAS_SETTINGS):
-      ret.invalidLkasSetting = cp_ap_party.vl["DAS_settings"]["DAS_autosteerEnabled"] != 0
+      # FSD14 has an explicit, Panda-enforced handoff for stock Autopilot, so
+      # the Tesla Autosteer setting may remain enabled. Older firmware keeps
+      # the upstream requirement to disable stock Autosteer.
+      ret.invalidLkasSetting = invalid_lkas_setting(self.CP.flags, cp_ap_party.vl["DAS_settings"]["DAS_autosteerEnabled"] != 0)
 
       # Because we don't have FSD 14 detection outside of a set of FW, we should check if this FW is accidentally missing from FSD_14_FW
       # 1. If in Autosteer or FSD, already caught by invalidLkasSetting
