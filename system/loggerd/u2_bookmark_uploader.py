@@ -17,9 +17,9 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.system.hardware.hw import Paths
 
 
-CONFIG_PATH = Path("/persist/comma/u2_log_upload.json")
-DEFAULT_IDENTITY_PATH = Path("/persist/comma/u2_log_upload_ed25519")
-DEFAULT_KNOWN_HOSTS_PATH = Path("/persist/comma/u2_log_upload_known_hosts")
+CONFIG_PATH = Path("/data/persist/comma/u2_log_upload.json")
+DEFAULT_IDENTITY_PATH = Path("/data/persist/comma/u2_log_upload_ed25519")
+DEFAULT_KNOWN_HOSTS_PATH = Path("/data/persist/comma/u2_log_upload_known_hosts")
 
 U2_BOOKMARK_ATTR_NAME = "user.u2_bookmark"
 U2_BOOKMARK_ATTR_VALUE = b"1"
