@@ -27,6 +27,8 @@ const int SEGMENT_LENGTH = LOGGERD_TEST ? atoi(getenv("LOGGERD_SEGMENT_LENGTH"))
 
 constexpr char PRESERVE_ATTR_NAME[] = "user.preserve";
 constexpr char PRESERVE_ATTR_VALUE = '1';
+constexpr char U2_BOOKMARK_ATTR_NAME[] = "user.u2_bookmark";
+constexpr char U2_BOOKMARK_ATTR_VALUE = '1';
 
 struct EncoderSettings {
   cereal::EncodeIndex::Type encode_type;

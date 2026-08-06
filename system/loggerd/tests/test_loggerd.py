@@ -19,6 +19,7 @@ from openpilot.system.hardware.hw import Paths
 from openpilot.system.hardware import TICI
 from openpilot.system.loggerd.xattr_cache import getxattr
 from openpilot.system.loggerd.deleter import PRESERVE_ATTR_NAME, PRESERVE_ATTR_VALUE
+from openpilot.system.loggerd.u2_bookmark_uploader import U2_BOOKMARK_ATTR_NAME, U2_BOOKMARK_ATTR_VALUE
 from openpilot.system.manager.process_config import managed_processes
 from openpilot.system.version import get_version
 from openpilot.tools.lib.helpers import RE
@@ -303,6 +304,15 @@ class TestLoggerd:
 
     segment_dir = self._get_latest_log_dir()
     assert getxattr(segment_dir, PRESERVE_ATTR_NAME) == PRESERVE_ATTR_VALUE
+    assert getxattr(segment_dir, U2_BOOKMARK_ATTR_NAME) == U2_BOOKMARK_ATTR_VALUE
+
+  def test_audio_feedback_does_not_queue_u2_upload(self):
+    services = {"audioFeedback"}
+    self._publish_random_messages(services)
+
+    segment_dir = self._get_latest_log_dir()
+    assert getxattr(segment_dir, PRESERVE_ATTR_NAME) == PRESERVE_ATTR_VALUE
+    assert getxattr(segment_dir, U2_BOOKMARK_ATTR_NAME) is None
 
   def test_not_preserving_nonbookmarked_segments(self):
     services = set(random.sample(CEREAL_SERVICES, random.randint(5, 10))) - {"userBookmark", "audioFeedback"}
@@ -310,6 +320,7 @@ class TestLoggerd:
 
     segment_dir = self._get_latest_log_dir()
     assert getxattr(segment_dir, PRESERVE_ATTR_NAME) is None
+    assert getxattr(segment_dir, U2_BOOKMARK_ATTR_NAME) is None
 
   @pytest.mark.xdist_group("camera_encoder_tests")  # setting xdist group ensures tests are run in same worker, prevents encoderd from crashing
   @pytest.mark.parametrize("record_front", [True, False])

@@ -436,6 +436,7 @@ class TestTeslaSafetyBase(common.CarSafetyTest, common.AngleSteeringSafetyTest, 
       # Tesla safety deliberately assumes legacy Summon/Autopark is active on
       # startup until the first low-frequency DI_state message arrives.
       self.assertEqual(1, self._rx(self._pcm_status_msg(False)))
+      self.assertEqual(1, self._rx(self._speed_msg(0)))
       self.assertEqual(1, self._rx(self._vehicle_moving_msg(0)))
 
     def assert_normal_forwarding():
@@ -460,18 +461,21 @@ class TestTeslaSafetyBase(common.CarSafetyTest, common.AngleSteeringSafetyTest, 
       self.assertTrue(self._tx(op_inactive_msg))
       return
 
-    # The default vehicle_moving value is false after safety initialization,
-    # but PREARM must wait for a fresh, validated ESP_B vehicle-state frame.
+    # The default speed and vehicle_moving values are zero/false after safety
+    # initialization, but PREARM must wait for fresh, validated speed and ESP_B
+    # vehicle-state frames.
     self._reset_safety_hooks()
     self.safety.set_timer(0)
     self.assertEqual(1, self._rx(self._pcm_status_msg(False)))
     self.assertEqual(1, self._rx(self._autopark_status_msg(True)))
     assert_normal_forwarding()
+    self.assertEqual(1, self._rx(self._speed_msg(0)))
+    assert_normal_forwarding()
     self.assertEqual(1, self._rx(self._vehicle_moving_msg(0)))
     assert_stock_passthrough()
 
-    # A previously observed standstill expires quickly. This prevents stale
-    # vehicle state from opening or keeping PREARM active.
+    # Previously observed speed/vehicle state expires quickly. This prevents
+    # stale low-speed data from opening or keeping PREARM active.
     reset_autopark_state()
     self.assertEqual(1, self._rx(self._autopark_status_msg(True)))
     assert_stock_passthrough()
@@ -508,14 +512,23 @@ class TestTeslaSafetyBase(common.CarSafetyTest, common.AngleSteeringSafetyTest, 
     self.assertEqual(1, self._rx(self._autopark_status_msg(True, bus=0)))
     assert_normal_forwarding()
 
-    # Readiness while moving does not open passthrough. It may PREARM only
-    # after the validated standstill signal arrives while readiness is fresh.
+    # Tesla offers Autopark while rolling slowly. Fresh readiness below the
+    # documented 13 km/h detection limit opens passthrough without waiting for
+    # standstill, then closes immediately if speed rises above the limit.
     reset_autopark_state()
     self.safety.set_timer(0)
     self.assertEqual(1, self._rx(self._vehicle_moving_msg(1)))
+    self.assertEqual(1, self._rx(self._speed_msg(13.5 / 3.6)))
     self.assertEqual(1, self._rx(self._autopark_status_msg(True)))
     assert_normal_forwarding()
-    self.assertEqual(1, self._rx(self._vehicle_moving_msg(0)))
+    self.assertEqual(1, self._rx(self._speed_msg(3.5 / 3.6)))
+    assert_stock_passthrough()
+    self.assertEqual(1, self._rx(self._speed_msg(13.5 / 3.6)))
+    assert_normal_forwarding()
+
+    # Falling back below the limit while readiness and ESP state remain fresh
+    # may PREARM again on the next validated speed frame.
+    self.assertEqual(1, self._rx(self._speed_msg(3.5 / 3.6)))
     assert_stock_passthrough()
 
     # PREARM expires after one second without a fresh readiness status.
@@ -530,8 +543,8 @@ class TestTeslaSafetyBase(common.CarSafetyTest, common.AngleSteeringSafetyTest, 
     self.assertEqual(1, self._rx(self._autopark_status_msg(False)))
     assert_normal_forwarding()
 
-    # Neither control channel may be active when PREARM begins. Disabling a
-    # channel later is not enough; a new validated readiness frame is required.
+    # Neither control channel may be active when PREARM begins. Once both are
+    # disabled, a fresh low-speed frame may PREARM while readiness remains fresh.
     for lateral_only in (False, True):
       reset_autopark_state()
       if lateral_only:
@@ -543,7 +556,7 @@ class TestTeslaSafetyBase(common.CarSafetyTest, common.AngleSteeringSafetyTest, 
       self.safety.set_controls_allowed(False)
       self.safety.set_controls_allowed_lateral(False)
       assert_normal_forwarding()
-      self.assertEqual(1, self._rx(self._autopark_status_msg(True)))
+      self.assertEqual(1, self._rx(self._speed_msg(0)))
       assert_stock_passthrough()
 
     # ACTIVE Autopark requires both state 6 and WaitingForBrake on a fresh

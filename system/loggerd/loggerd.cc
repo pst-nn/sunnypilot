@@ -194,20 +194,28 @@ int handle_encoder_msg(LoggerdState *s, Message *msg, std::string &name, struct 
   return bytes_count;
 }
 
-void handle_preserve_segment(LoggerdState *s) {
+void set_segment_xattr(const std::string &path, const char *name, const char value) {
+#ifdef __APPLE__
+  int ret = setxattr(path.c_str(), name, &value, 1, 0, 0);
+#else
+  int ret = setxattr(path.c_str(), name, &value, 1, 0);
+#endif
+  if (ret) {
+    LOGE("setxattr %s failed for %s: %s", name, path.c_str(), strerror(errno));
+  }
+}
+
+void handle_preserve_segment(LoggerdState *s, const bool user_bookmark) {
   static int prev_segment = -1;
+  if (user_bookmark) {
+    // Durable trigger for the private u2 uploader. Audio feedback still
+    // preserves a segment, but must not enqueue a remote log upload.
+    set_segment_xattr(s->logger.segmentPath(), U2_BOOKMARK_ATTR_NAME, U2_BOOKMARK_ATTR_VALUE);
+  }
   if (s->logger.segment() == prev_segment) return;
 
   LOGW("preserving %s", s->logger.segmentPath().c_str());
-
-#ifdef __APPLE__
-  int ret = setxattr(s->logger.segmentPath().c_str(), PRESERVE_ATTR_NAME, &PRESERVE_ATTR_VALUE, 1, 0, 0);
-#else
-  int ret = setxattr(s->logger.segmentPath().c_str(), PRESERVE_ATTR_NAME, &PRESERVE_ATTR_VALUE, 1, 0);
-#endif
-  if (ret) {
-    LOGE("setxattr %s failed for %s: %s", PRESERVE_ATTR_NAME, s->logger.segmentPath().c_str(), strerror(errno));
-  }
+  set_segment_xattr(s->logger.segmentPath(), PRESERVE_ATTR_NAME, PRESERVE_ATTR_VALUE);
 
   // mark route for uploading
   Params params;
@@ -282,7 +290,7 @@ void loggerd_thread() {
 
       ServiceState &service = service_state[sock];
       if (service.preserve_segment) {
-        handle_preserve_segment(&s);
+        handle_preserve_segment(&s, service.name == "userBookmark");
       }
 
       // drain socket
