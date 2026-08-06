@@ -59,7 +59,8 @@ def test_apply_and_detect_profile(profile: DrivingProfile, expected: tuple[bool,
     params.get_bool("AlphaLongitudinalEnabled"),
     params.get_bool("ExperimentalMode"),
   ) == expected
-  assert params.get_bool("OnroadCycleRequested")
+  assert params.get_bool("DoReboot")
+  assert not params.get_bool("OnroadCycleRequested")
   assert all(block for _, _, block in params.writes)
 
 
@@ -74,7 +75,7 @@ def test_experimental_profile_uses_conservative_write_order_and_records_confirma
     ("OpenpilotEnabledToggle", True, True),
     ("ExperimentalModeConfirmed", True, True),
     ("ExperimentalMode", True, True),
-    ("OnroadCycleRequested", True, True),
+    ("DoReboot", True, True),
   ]
 
 

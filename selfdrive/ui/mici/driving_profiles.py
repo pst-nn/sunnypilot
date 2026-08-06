@@ -88,5 +88,7 @@ def apply_driving_profile(params: ParamsLike, profile: DrivingProfile) -> None:
     params.put_bool("ExperimentalModeConfirmed", True, block=True)
     params.put_bool("ExperimentalMode", True, block=True)
 
-  # Alpha longitudinal and OpenpilotEnabledToggle are consumed at controls startup.
-  params.put_bool("OnroadCycleRequested", True, block=True)
+  # Alpha longitudinal and OpenpilotEnabledToggle are consumed during manager
+  # startup. A true reboot keeps CarParams and Panda safety configuration in
+  # sync; an onroad cycle alone can leave the old Panda safetyParam active.
+  params.put_bool("DoReboot", True, block=True)

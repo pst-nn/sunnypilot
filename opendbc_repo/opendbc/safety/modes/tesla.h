@@ -25,6 +25,10 @@ static bool tesla_stock_aeb = false;
 // TODO: Only LKAS (non-emergency) is currently supported since we've only seen it
 static bool tesla_stock_lkas = false;
 static bool tesla_stock_lkas_prev = false;
+static bool tesla_stock_autopilot = false;
+static bool tesla_stock_autopilot_cruise_seen = false;
+static bool tesla_autopilot_request_prev = false;
+static uint32_t tesla_stock_autopilot_request_ts = 0U;
 
 typedef enum {
   TESLA_STOCK_AUTOPARK_OFF,
@@ -229,6 +233,16 @@ static void tesla_rx_hook(const CANPacket_t *msg) {
 
     // Cruise and Autopark/Summon state
     if (msg->addr == 0x286U) {
+      const bool autopilot_request = GET_BIT(msg, 36U);
+      if (tesla_fsd_14 && autopilot_request && !tesla_autopilot_request_prev) {
+        // A double-stalk stock Autopilot request must transfer ownership before
+        // the first stock steering/permission frame reaches the forwarding hook.
+        tesla_stock_autopilot = true;
+        tesla_stock_autopilot_cruise_seen = false;
+        tesla_stock_autopilot_request_ts = microsecond_timer_get();
+      }
+      tesla_autopilot_request_prev = autopilot_request;
+
       // Autopark state
       int autopark_state = (msg->data[3] >> 1) & 0x0FU;  // DI_autoparkState
       bool tesla_autopark_now = (autopark_state == 3) ||  // ACTIVE
@@ -252,11 +266,25 @@ static void tesla_rx_hook(const CANPacket_t *msg) {
                             (cruise_state == 6) ||  // PRE_FAULT
                             (cruise_state == 7);    // PRE_CANCEL
 
+      if (tesla_stock_autopilot && cruise_engaged) {
+        tesla_stock_autopilot_cruise_seen = true;
+      }
+      if (tesla_stock_autopilot && !autopilot_request && !tesla_stock_lkas_prev) {
+        const bool cruise_cycle_complete = tesla_stock_autopilot_cruise_seen && !cruise_engaged;
+        const bool request_timed_out = !tesla_stock_autopilot_cruise_seen &&
+          (safety_get_ts_elapsed(microsecond_timer_get(), tesla_stock_autopilot_request_ts) > 2000000U);
+        if (cruise_cycle_complete || request_timed_out) {
+          tesla_stock_autopilot = false;
+          tesla_stock_autopilot_cruise_seen = false;
+        }
+      }
+
       const bool stock_autopark_passthrough = tesla_stock_autopark_passthrough();
       if (tesla_autopark_require_cruise_off && !cruise_engaged) {
         tesla_autopark_require_cruise_off = false;
       }
-      cruise_engaged = cruise_engaged && !tesla_autopark && !stock_autopark_passthrough && !tesla_autopark_require_cruise_off;
+      cruise_engaged = cruise_engaged && !tesla_autopark && !stock_autopark_passthrough &&
+                       !tesla_autopark_require_cruise_off && !tesla_stock_autopilot;
 
       pcm_cruise_check(cruise_engaged);
     }
@@ -318,11 +346,18 @@ static void tesla_rx_hook(const CANPacket_t *msg) {
       int steering_control_type = msg->data[2] >> 6;
       bool tesla_stock_lkas_now = steering_control_type == tesla_get_steer_ctrl_type(2);  // "LANE_KEEP_ASSIST"
 
-      // Only consider rising edges while controls are not allowed
-      if (tesla_stock_lkas_now && !tesla_stock_lkas_prev && !(controls_allowed || controls_allowed_lateral)) {
+      if (tesla_fsd_14 && tesla_stock_lkas_now && !tesla_stock_lkas_prev) {
+        // FSD14 stock Autopilot is allowed to take priority over comma after a
+        // double-stalk request, including when TACC/comma is already active.
+        // Keep the latch until a complete Tesla cruise-off cycle is observed.
+        tesla_stock_autopilot = true;
+        tesla_stock_autopilot_request_ts = microsecond_timer_get();
+      } else if (tesla_stock_lkas_now && !tesla_stock_lkas_prev && !(controls_allowed || controls_allowed_lateral)) {
+        // Preserve legacy stock LKAS passthrough behavior.
         tesla_stock_lkas = true;
+      } else {
       }
-      if (!tesla_stock_lkas_now) {
+      if (!tesla_fsd_14 && !tesla_stock_lkas_now) {
         tesla_stock_lkas = false;
       }
       tesla_stock_lkas_prev = tesla_stock_lkas_now;
@@ -355,7 +390,7 @@ static bool tesla_tx_hook(const CANPacket_t *msg) {
   bool violation = false;
 
   // Don't send any messages when Autopark is active
-  if (tesla_autopark || tesla_stock_autopark_passthrough()) {
+  if (tesla_autopark || tesla_stock_autopark_passthrough() || tesla_stock_autopilot) {
     violation = true;
   }
 
@@ -437,7 +472,7 @@ static bool tesla_fwd_hook(int bus_num, int addr) {
   bool block_msg = false;
 
   if (bus_num == 2) {
-    if (!tesla_autopark && !tesla_stock_autopark_passthrough()) {
+    if (!tesla_autopark && !tesla_stock_autopark_passthrough() && !tesla_stock_autopilot) {
       // APS_eacMonitor
       if (addr == 0x27d) {
         block_msg = true;
@@ -487,6 +522,10 @@ static safety_config tesla_init(uint16_t param) {
   tesla_stock_aeb = false;
   tesla_stock_lkas = false;
   tesla_stock_lkas_prev = false;
+  tesla_stock_autopilot = false;
+  tesla_stock_autopilot_cruise_seen = false;
+  tesla_autopilot_request_prev = false;
+  tesla_stock_autopilot_request_ts = 0U;
   tesla_stock_autopark_state = TESLA_STOCK_AUTOPARK_OFF;
   tesla_autopark_ready = false;
   tesla_autopark_ready_ts = 0U;

@@ -59,8 +59,8 @@ class DrivingProfileHomeButton(Widget):
     rl.draw_rectangle_rounded_lines_ex(self._rect, 0.35, 8, 1, rl.Color(255, 255, 255, 35))
 
     if feedback_active:
-      kicker = "PROFILE APPLIED" if self._feedback_was_started else "PROFILE SAVED"
-      label = "RESTARTING" if self._feedback_was_started else "NEXT DRIVE"
+      kicker = "PROFILE APPLIED"
+      label = "REBOOTING"
     else:
       kicker = "DRIVING PROFILE"
       label = get_driving_profile_label(ui_state.params)
@@ -175,11 +175,11 @@ class DrivingProfilesLayout(NavScroller):
       gui_app.push_widget(BigDialog("profile change failed", "Do not drive until the settings are checked."))
       return
 
-    cloudlog.info(f"driving profile changed to {profile.value}; onroad cycle requested")
+    cloudlog.info(f"driving profile changed to {profile.value}; reboot requested")
     try:
       ui_state.update_params()
     except Exception:
-      # Params were already committed and the cycle was requested. A refresh
+      # Params were already committed and the reboot was requested. A refresh
       # failure must not invite the user to repeat the write mid-cycle.
       cloudlog.exception("driving profile UI refresh failed")
     self._refresh_cards()
