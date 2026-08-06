@@ -40,7 +40,8 @@ typedef enum {
 
 // Vision Autopark does not expose the touchscreen press on a CAN signal we
 // receive. Open a short stock passthrough window only after the car advertises
-// Autopark readiness while stopped and both openpilot control channels are off.
+// Autopark readiness at Tesla's documented low-speed limit and both openpilot
+// control channels are off.
 static TeslaStockAutoparkState tesla_stock_autopark_state = TESLA_STOCK_AUTOPARK_OFF;
 static bool tesla_autopark_ready = false;
 static uint32_t tesla_autopark_ready_ts = 0U;
@@ -50,6 +51,8 @@ static bool tesla_autopark_active_prev = false;
 static bool tesla_autopark_require_cruise_off = false;
 static bool tesla_vehicle_state_seen = false;
 static uint32_t tesla_vehicle_state_ts = 0U;
+static bool tesla_vehicle_speed_seen = false;
+static uint32_t tesla_vehicle_speed_ts = 0U;
 
 // Only Summon is currently supported due to Autopark not setting Autopark state properly
 static bool tesla_autopark = false;
@@ -153,16 +156,25 @@ static int tesla_get_steer_ctrl_type(const int ctrl_type) {
   return steer_ctrl_type;
 }
 
+static bool tesla_autopark_speed_allowed(void) {
+  const float AUTOPARK_PREARM_MAX_SPEED = 13.0 * KPH_TO_MS;
+  const float speed = SAFETY_ABS((float)vehicle_speed.values[0] / VEHICLE_SPEED_FACTOR);
+  return tesla_vehicle_speed_seen && (speed < AUTOPARK_PREARM_MAX_SPEED);
+}
+
 static bool tesla_stock_autopark_passthrough(void) {
   const uint32_t now = microsecond_timer_get();
   const uint32_t PREARM_TIMEOUT = 1000000U;
   const uint32_t VEHICLE_STATE_TIMEOUT = 100000U;
+  const uint32_t VEHICLE_SPEED_TIMEOUT = 100000U;
   const uint32_t ACTIVE_STATUS_TIMEOUT = 1500000U;
 
   if (tesla_stock_autopark_state == TESLA_STOCK_AUTOPARK_PREARM) {
     const bool ready_stale = safety_get_ts_elapsed(now, tesla_autopark_ready_ts) > PREARM_TIMEOUT;
     const bool vehicle_state_stale = safety_get_ts_elapsed(now, tesla_vehicle_state_ts) > VEHICLE_STATE_TIMEOUT;
-    if (!tesla_autopark_ready || ready_stale || !tesla_vehicle_state_seen || vehicle_state_stale || vehicle_moving ||
+    const bool vehicle_speed_stale = safety_get_ts_elapsed(now, tesla_vehicle_speed_ts) > VEHICLE_SPEED_TIMEOUT;
+    if (!tesla_autopark_ready || ready_stale || !tesla_vehicle_state_seen || vehicle_state_stale ||
+        !tesla_autopark_speed_allowed() || vehicle_speed_stale ||
         controls_allowed || controls_allowed_lateral) {
       tesla_stock_autopark_state = TESLA_STOCK_AUTOPARK_OFF;
     }
@@ -181,12 +193,15 @@ static bool tesla_stock_autopark_passthrough(void) {
 static void tesla_try_enter_autopark_prearm(void) {
   const uint32_t PREARM_TIMEOUT = 1000000U;
   const uint32_t VEHICLE_STATE_TIMEOUT = 100000U;
+  const uint32_t VEHICLE_SPEED_TIMEOUT = 100000U;
   const uint32_t now = microsecond_timer_get();
   const bool ready_fresh = safety_get_ts_elapsed(now, tesla_autopark_ready_ts) <= PREARM_TIMEOUT;
   const bool vehicle_state_fresh = safety_get_ts_elapsed(now, tesla_vehicle_state_ts) <= VEHICLE_STATE_TIMEOUT;
+  const bool vehicle_speed_fresh = safety_get_ts_elapsed(now, tesla_vehicle_speed_ts) <= VEHICLE_SPEED_TIMEOUT;
 
   if ((tesla_stock_autopark_state == TESLA_STOCK_AUTOPARK_OFF) && tesla_autopark_ready && ready_fresh && tesla_vehicle_state_seen &&
-      vehicle_state_fresh && !vehicle_moving && !(controls_allowed || controls_allowed_lateral) && !tesla_autopark_active_prev) {
+      vehicle_state_fresh && vehicle_speed_fresh && tesla_autopark_speed_allowed() &&
+      !(controls_allowed || controls_allowed_lateral) && !tesla_autopark_active_prev) {
     tesla_stock_autopark_state = TESLA_STOCK_AUTOPARK_PREARM;
   }
 }
@@ -213,6 +228,9 @@ static void tesla_rx_hook(const CANPacket_t *msg) {
       // Vehicle speed: ((val * 0.08) - 40) / MS_TO_KPH
       float speed = ((((msg->data[2] << 4) | (msg->data[1] >> 4)) * 0.08) - 40.) * KPH_TO_MS;
       UPDATE_VEHICLE_SPEED(speed);
+      tesla_vehicle_speed_seen = true;
+      tesla_vehicle_speed_ts = microsecond_timer_get();
+      tesla_try_enter_autopark_prearm();
     }
 
     // 2nd vehicle speed (ESP_B)
@@ -550,6 +568,8 @@ static safety_config tesla_init(uint16_t param) {
   tesla_autopark_require_cruise_off = false;
   tesla_vehicle_state_seen = false;
   tesla_vehicle_state_ts = 0U;
+  tesla_vehicle_speed_seen = false;
+  tesla_vehicle_speed_ts = 0U;
   // we need to assume Autopark/Summon on startup since DI_state is a low freq msg.
   // this is so that we don't fault if starting while these systems are active
   tesla_autopark = true;
