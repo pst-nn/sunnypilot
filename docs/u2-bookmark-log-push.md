@@ -17,7 +17,9 @@ It is disabled until device-local credentials and configuration are provisioned.
 
 ## Device configuration
 
-Create `/persist/comma/u2_log_upload.json` without committing it:
+Create `/data/persist/comma/u2_log_upload.json` without committing it. On
+comma four, `/persist` is a read-only system partition; `/data/persist` is the
+writable persistent location.
 
 ```json
 {
@@ -30,8 +32,8 @@ Create `/persist/comma/u2_log_upload.json` without committing it:
 
 The default credential paths are:
 
-- `/persist/comma/u2_log_upload_ed25519` (mode `0600`)
-- `/persist/comma/u2_log_upload_known_hosts`
+- `/data/persist/comma/u2_log_upload_ed25519` (mode `0600`)
+- `/data/persist/comma/u2_log_upload_known_hosts`
 
 Generate the private key on the comma. Install only its public half on the
 server. Pin the server's trusted host key in the known-hosts file; do not use
