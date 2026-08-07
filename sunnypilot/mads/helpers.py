@@ -21,6 +21,11 @@ class MadsSteeringModeOnBrake:
   DISENGAGE = 2
 
 
+def is_tesla_stock_adas_handoff(CP: structs.CarParams, CS: structs.CarState) -> bool:
+  """True while Tesla stock Autopilot or Autopark owns the control path."""
+  return CP.brand == "tesla" and CS.blockPcmEnable
+
+
 def get_mads_limited_brands(CP: structs.CarParams, CP_SP: structs.CarParamsSP) -> bool:
   if CP.brand == 'rivian':
     return True
