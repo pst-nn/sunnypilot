@@ -14,6 +14,7 @@ from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
 from openpilot.sunnypilot import PARAMS_UPDATE_PERIOD
 from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
+from openpilot.sunnypilot.mads.helpers import is_tesla_stock_adas_handoff
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
 from openpilot.sunnypilot.selfdrive.controls.lib.blinker_pause_lateral import BlinkerPauseLateral
 from openpilot.sunnypilot.selfdrive.controls.lib.latcontrol_torque_v0 import LatControlTorque as LatControlTorqueV0
@@ -57,6 +58,12 @@ class ControlsExt(ModelStateBase):
       self._param_update_time = time.monotonic()
 
   def get_lat_active(self, sm: messaging.SubMaster) -> bool:
+    # Fail closed while stock Tesla ADAS owns the control path. This guard is
+    # independent of selfdriveStateSP timing so no stale MADS state can keep
+    # the lateral controller active during the handoff.
+    if is_tesla_stock_adas_handoff(self.CP, sm['carState']):
+      return False
+
     if self.blinker_pause_lateral.update(sm['carState']):
       return False
 
