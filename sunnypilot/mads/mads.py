@@ -10,7 +10,12 @@ from cereal import log, custom
 from opendbc.car import structs
 from opendbc.car.hyundai.values import HyundaiFlags
 from openpilot.common.params import Params
-from openpilot.sunnypilot.mads.helpers import MadsSteeringModeOnBrake, read_steering_mode_param, MADS_NO_ACC_MAIN_BUTTON
+from openpilot.sunnypilot.mads.helpers import (
+  MADS_NO_ACC_MAIN_BUTTON,
+  MadsSteeringModeOnBrake,
+  is_tesla_stock_adas_handoff,
+  read_steering_mode_param,
+)
 from openpilot.sunnypilot.mads.state import StateMachine, GEARS_ALLOW_PAUSED_SILENT
 
 State = custom.ModularAssistiveDrivingSystem.ModularAssistiveDrivingSystemState
@@ -117,6 +122,19 @@ class ModularAssistiveDrivingSystem:
       self.lateral_mismatch_counter += 1
 
   def update_events(self, CS: structs.CarState):
+    # Tesla's stock-ADAS ownership latch is authoritative. Fully disable MADS
+    # instead of only masking the UI: controlsd will reset lateral control,
+    # the UI will become disengaged, and a fresh stalk engagement is required
+    # after Tesla cruise completes its off cycle.
+    if is_tesla_stock_adas_handoff(self.CP, CS):
+      self.events.remove(EventName.pcmEnable)
+      self.events.remove(EventName.buttonEnable)
+      self.events_sp.remove(EventNameSP.lkasEnable)
+      self.events_sp.remove(EventNameSP.silentLkasEnable)
+      if self.state_machine.state != State.disabled:
+        self.events_sp.add(EventNameSP.lkasDisable)
+      return
+
     if not self.selfdrive.enabled and self.enabled:
       if CS.standstill:
         if self.events.has(EventName.doorOpen):
