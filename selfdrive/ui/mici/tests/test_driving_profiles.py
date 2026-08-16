@@ -62,6 +62,7 @@ def test_apply_and_detect_profile(profile: DrivingProfile, expected: tuple[bool,
   smart_cruise_expected = profile == DrivingProfile.SUNNY_LONG_EXPERIMENTAL
   assert params.get_bool("SmartCruiseControlVision") is smart_cruise_expected
   assert params.get_bool("SmartCruiseControlMap") is smart_cruise_expected
+  assert params.get_bool("DynamicExperimentalControl") is smart_cruise_expected
   assert params.get_bool("DoReboot")
   assert not params.get_bool("OnroadCycleRequested")
   assert all(block for _, _, block in params.writes)
@@ -74,6 +75,7 @@ def test_experimental_profile_uses_conservative_write_order_and_records_confirma
 
   assert params.writes == [
     ("ExperimentalMode", False, True),
+    ("DynamicExperimentalControl", False, True),
     ("SmartCruiseControlVision", False, True),
     ("SmartCruiseControlMap", False, True),
     ("AlphaLongitudinalEnabled", True, True),
@@ -81,6 +83,7 @@ def test_experimental_profile_uses_conservative_write_order_and_records_confirma
     ("ExperimentalModeConfirmed", True, True),
     ("SmartCruiseControlVision", True, True),
     ("SmartCruiseControlMap", True, True),
+    ("DynamicExperimentalControl", True, True),
     ("ExperimentalMode", True, True),
     ("DoReboot", True, True),
   ]
@@ -89,6 +92,7 @@ def test_experimental_profile_uses_conservative_write_order_and_records_confirma
 def test_non_experimental_profiles_do_not_clear_prior_confirmation():
   params = FakeParams({
     "ExperimentalModeConfirmed": True,
+    "DynamicExperimentalControl": True,
     "SmartCruiseControlVision": True,
     "SmartCruiseControlMap": True,
   })
@@ -96,6 +100,7 @@ def test_non_experimental_profiles_do_not_clear_prior_confirmation():
   apply_driving_profile(params, DrivingProfile.SUNNY_TACC)
 
   assert params.get_bool("ExperimentalModeConfirmed")
+  assert not params.get_bool("DynamicExperimentalControl")
   assert not params.get_bool("SmartCruiseControlVision")
   assert not params.get_bool("SmartCruiseControlMap")
   assert not any(key == "ExperimentalModeConfirmed" for key, _, _ in params.writes)

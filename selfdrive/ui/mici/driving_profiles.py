@@ -77,11 +77,13 @@ def profile_change_allowed(started: bool, engaged: bool, car_state_alive: bool, 
 def apply_driving_profile(params: ParamsLike, profile: DrivingProfile) -> None:
   config = PROFILE_CONFIGS[profile]
   smart_cruise_enabled = profile == DrivingProfile.SUNNY_LONG_EXPERIMENTAL
+  dynamic_experimental_enabled = profile == DrivingProfile.SUNNY_LONG_EXPERIMENTAL
 
   # Move through a conservative intermediate state. This matters if a write fails:
-  # Experimental mode and Smart Cruise Control are disabled before changing the
-  # startup-only controls.
+  # Experimental mode, Dynamic Experimental Control, and Smart Cruise Control
+  # are disabled before changing the startup-only controls.
   params.put_bool("ExperimentalMode", False, block=True)
+  params.put_bool("DynamicExperimentalControl", False, block=True)
   params.put_bool("SmartCruiseControlVision", False, block=True)
   params.put_bool("SmartCruiseControlMap", False, block=True)
   params.put_bool("AlphaLongitudinalEnabled", config.alpha_longitudinal_enabled, block=True)
@@ -92,6 +94,7 @@ def apply_driving_profile(params: ParamsLike, profile: DrivingProfile) -> None:
     params.put_bool("ExperimentalModeConfirmed", True, block=True)
     params.put_bool("SmartCruiseControlVision", smart_cruise_enabled, block=True)
     params.put_bool("SmartCruiseControlMap", smart_cruise_enabled, block=True)
+    params.put_bool("DynamicExperimentalControl", dynamic_experimental_enabled, block=True)
     params.put_bool("ExperimentalMode", True, block=True)
 
   # Alpha longitudinal and OpenpilotEnabledToggle are consumed during manager
