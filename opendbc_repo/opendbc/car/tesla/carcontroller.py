@@ -4,7 +4,7 @@ from opendbc.car import Bus
 from opendbc.car.lateral import apply_steer_angle_limits_vm
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.tesla.teslacan import TeslaCAN
-from opendbc.car.tesla.values import CarControllerParams
+from opendbc.car.tesla.values import CarControllerParams, TeslaFlags
 from opendbc.car.vehicle_model import VehicleModel
 from opendbc.sunnypilot.car.tesla.coop_steering import CoopSteeringCarController
 
@@ -19,7 +19,7 @@ def get_safety_CP():
 class CarController(CarControllerBase, CoopSteeringCarController):
   def __init__(self, dbc_names, CP, CP_SP):
     CarControllerBase.__init__(self, dbc_names, CP, CP_SP)
-    CoopSteeringCarController.__init__(self)
+    CoopSteeringCarController.__init__(self, bool(CP.flags & TeslaFlags.FSD_14))
     self.apply_angle_last = 0
     self.packer = CANPacker(dbc_names[Bus.party])
     self.tesla_can = TeslaCAN(CP, self.packer)
@@ -28,7 +28,7 @@ class CarController(CarControllerBase, CoopSteeringCarController):
     self.VM = VehicleModel(get_safety_CP())
 
   def update(self, CC, CC_SP, CS, now_nanos):
-    CoopSteeringCarController.update(self, self.CP_SP)
+    CoopSteeringCarController.update(self, self.CP_SP, CS.out.cruiseState.enabled)
     actuators = CC.actuators
     can_sends = []
 
