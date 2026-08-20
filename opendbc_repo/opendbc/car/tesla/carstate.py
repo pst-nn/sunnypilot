@@ -48,6 +48,7 @@ class CarState(CarStateBase, CarStateExt):
     self.stock_handoff_active = False
     self.stock_handoff_cruise_seen = False
     self.stock_handoff_grace_frames = 0
+    self.autosteer_enabled = False
 
     self.hands_on_level = 0
     self.das_control = None
@@ -185,13 +186,15 @@ class CarState(CarStateBase, CarStateExt):
     # LKAS switched from LANE_KEEP_ASSIST to ANGLE_CONTROL to likely allow overriding LKAS events smoothly
     ret.stockLkas = stock_lkas  # LANE_KEEP_ASSIST
 
+    self.autosteer_enabled = cp_ap_party.vl["DAS_settings"]["DAS_autosteerEnabled"] != 0
+
     # Stock Autosteer should be off (includes FSD)
     # TODO: find for TESLA_MODEL_X and HW2.5 vehicles
     if not (self.CP.flags & TeslaFlags.MISSING_DAS_SETTINGS):
       # FSD14 has an explicit, Panda-enforced handoff for stock Autopilot, so
       # the Tesla Autosteer setting may remain enabled. Older firmware keeps
       # the upstream requirement to disable stock Autosteer.
-      ret.invalidLkasSetting = invalid_lkas_setting(self.CP.flags, cp_ap_party.vl["DAS_settings"]["DAS_autosteerEnabled"] != 0)
+      ret.invalidLkasSetting = invalid_lkas_setting(self.CP.flags, self.autosteer_enabled)
 
       # Because we don't have FSD 14 detection outside of a set of FW, we should check if this FW is accidentally missing from FSD_14_FW
       # 1. If in Autosteer or FSD, already caught by invalidLkasSetting
