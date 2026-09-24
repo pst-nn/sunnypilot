@@ -7,7 +7,7 @@ from opendbc.car.tesla.carstate import CarState, invalid_lkas_setting, is_fsd14_
 from opendbc.car.tesla.interface import CarInterface
 from opendbc.car.tesla.fingerprints import FW_VERSIONS
 from opendbc.car.tesla.radar_interface import RADAR_START_ADDR
-from opendbc.car.tesla.values import CAR, FSD_14_FW, TeslaFlags
+from opendbc.car.tesla.values import CAR, FSD_14_FW, TeslaFlags, TeslaSafetyFlags
 
 Ecu = CarParams.Ecu
 
@@ -85,6 +85,20 @@ class TestTeslaFingerprint(unittest.TestCase):
           and int(m['software_major']) >= 4
         )
         assert is_fsd_14 == expected, f"{fw}"
+
+  def test_updated_model_y_eps_fw_enables_fsd14_safety(self):
+    fingerprint = gen_empty_fingerprint()
+    car_fw = [CarParams.CarFw(
+      ecu=Ecu.eps,
+      address=0x730,
+      subAddress=0,
+      fwVersion=b'TeMYG4_Main_0.0.0 (87),Y4003.09.3',
+    )]
+
+    CP = CarInterface.get_params(CAR.TESLA_MODEL_Y, fingerprint, car_fw, True, False, False)
+    assert CP.flags & TeslaFlags.FSD_14
+    assert CP.safetyConfigs[0].safetyParam & TeslaSafetyFlags.FSD_14
+    assert CP.safetyConfigs[0].safetyParam & TeslaSafetyFlags.LONG_CONTROL
 
   def test_radar_detection(self):
     # Test radar availability detection for cars with radar DBC defined
