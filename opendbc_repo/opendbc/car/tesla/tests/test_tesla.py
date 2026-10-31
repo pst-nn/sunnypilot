@@ -88,17 +88,16 @@ class TestTeslaFingerprint(unittest.TestCase):
 
   def test_updated_model_y_eps_fw_enables_fsd14_safety(self):
     fingerprint = gen_empty_fingerprint()
-    car_fw = [CarParams.CarFw(
-      ecu=Ecu.eps,
-      address=0x730,
-      subAddress=0,
-      fwVersion=b'TeMYG4_Main_0.0.0 (87),Y4003.09.3',
-    )]
-
-    CP = CarInterface.get_params(CAR.TESLA_MODEL_Y, fingerprint, car_fw, True, False, False)
-    assert CP.flags & TeslaFlags.FSD_14
-    assert CP.safetyConfigs[0].safetyParam & TeslaSafetyFlags.FSD_14
-    assert CP.safetyConfigs[0].safetyParam & TeslaSafetyFlags.LONG_CONTROL
+    fingerprint[2][0x293] = 8  # DAS_settings is present on the affected vehicle.
+    for fw_version in (b'TeMYG4_Main_0.0.0 (87),Y4003.09.3', b'TeMYG4_Main_0.0.0 (92),Y4003.10.2'):
+      for alpha_long in (False, True):
+        with self.subTest(fw_version=fw_version, alpha_long=alpha_long):
+          car_fw = [CarParams.CarFw(ecu=Ecu.eps, address=0x730, subAddress=0, fwVersion=fw_version)]
+          CP = CarInterface.get_params(CAR.TESLA_MODEL_Y, fingerprint, car_fw, alpha_long, False, False)
+          assert CP.flags & TeslaFlags.FSD_14
+          assert CP.safetyConfigs[0].safetyParam & TeslaSafetyFlags.FSD_14
+          assert bool(CP.safetyConfigs[0].safetyParam & TeslaSafetyFlags.LONG_CONTROL) == alpha_long
+          assert not invalid_lkas_setting(CP.flags, True)
 
   def test_radar_detection(self):
     # Test radar availability detection for cars with radar DBC defined

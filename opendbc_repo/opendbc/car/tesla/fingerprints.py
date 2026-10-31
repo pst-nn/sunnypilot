@@ -46,6 +46,7 @@ FW_VERSIONS = {
       b'TeMYG4_Main_0.0.0 (77),Y4003.05.4',
       b'TeMYG4_Main_0.0.0 (78),Y4003.06.0',
       b'TeMYG4_Main_0.0.0 (87),Y4003.09.3',
+      b'TeMYG4_Main_0.0.0 (92),Y4003.10.2',
       b'TeMYG4_SingleECU_0.0.0 (28),Y4S002.23.0',
       b'TeMYG4_SingleECU_0.0.0 (33),Y4S002.26',
     ],
